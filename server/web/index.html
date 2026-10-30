@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>HoloLens · 画面与标签</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+  <script src="/trajectory.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand"><span class="brand-mark" aria-hidden="true">H<span>1</span></span><div><strong>HoloLens</strong><span class="brand-divider">/</span><span>接收监控</span></div></div>
+    <div id="connection" class="connection" data-state="connecting" role="status"><i></i><span>正在连接接收服务</span></div>
+  </header>
+  <main>
+    <section class="page-heading">
+      <div><p class="eyebrow">HOLOLENS MONITOR</p><h1>画面、标签与轨迹</h1><p class="subtitle">核对上传画面与返回结果，查看设备的空间运动。</p></div>
+      <div class="page-actions"><span id="updated-at" class="muted">等待首次更新</span><button id="auto-toggle" class="button" aria-pressed="true">自动刷新 · 开</button><button id="refresh" class="button primary">立即刷新</button><button id="clear-history" class="button danger" disabled>清除图片记录</button></div>
+    </section>
+    <div id="error-banner" class="error-banner" role="alert" hidden></div>
+    <nav class="view-tabs" role="tablist" aria-label="监控视图"><button id="capture-tab" role="tab" aria-controls="capture-pane" aria-selected="true">画面与标签</button><button id="trajectory-tab" role="tab" aria-controls="trajectory-pane" aria-selected="false">空间轨迹 <span>1 Hz</span></button></nav>
+    <div id="capture-pane" role="tabpanel" aria-labelledby="capture-tab">
+    <section class="stats" aria-label="接收统计">
+      <div class="stat"><span>已接收图片</span><strong id="stat-photos">—</strong><small>保存在电脑上的原图</small></div>
+      <div class="stat"><span>已记录响应</span><strong id="stat-responded">—</strong><small>包括同一请求的重试</small></div>
+      <div class="stat"><span>正在处理</span><strong id="stat-processing">—</strong><small>等待生成或发送结果</small></div>
+      <div class="stat"><span>需要检查</span><strong id="stat-failed">—</strong><small>失败、断连或服务中断</small></div>
+    </section>
+    <div class="workspace">
+      <aside class="history panel" aria-label="上传历史">
+        <div class="history-heading"><h2>上传记录</h2><button id="follow-latest" class="text-button" aria-pressed="true">跟随最新</button></div>
+        <label class="search"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.5" cy="10.5" r="6.5"/><path d="m16 16 5 5"/></svg><input id="search" type="search" maxlength="128" placeholder="搜索序列号或请求 ID" aria-label="搜索序列号或请求 ID" autocomplete="off"></label>
+        <div id="capture-list" class="capture-list" aria-live="polite"></div>
+        <p id="list-empty" class="list-empty">正在读取记录…</p>
+        <button id="load-more" class="button load-more" hidden>加载更早记录</button>
+        <div class="history-footer"><span id="list-count">0 条记录</span><span>最新在前</span></div>
+      </aside>
+      <section class="detail-column" aria-label="图片与响应详情">
+        <div id="empty-state" class="panel empty-state"><div class="empty-symbol" aria-hidden="true">＋</div><h2>等待第一张画面</h2><p>在 HoloLens 上 Air Tap，或在模拟器中按 Enter。<br>收到图片后，这里会自动显示对应的标签结果。</p><span>每次触发一张图片 · 服务端默认等待 1 秒</span></div>
+        <div id="capture-view" hidden>
+          <section class="panel preview-panel">
+            <div class="preview-heading"><div><p class="eyebrow">SELECTED CAPTURE</p><h2 id="capture-title">—</h2></div><span id="capture-state" class="badge"></span></div>
+            <div class="preview-toolbar"><label class="check"><input id="overlay-toggle" type="checkbox" checked> 叠加标签位置</label><span id="image-dimensions">JPEG 原图</span><a id="download-image" class="text-button" download>下载原图 ↗</a></div>
+            <div id="photo-stage" class="photo-stage"><div class="photo-wrap"><img id="capture-image" alt="设备上传的原始画面"><div id="image-overlay" class="image-overlay" hidden><span class="crosshair"></span><span id="overlay-label" class="overlay-label"></span></div></div><p id="image-error" class="image-error" hidden>无法读取原图，请检查图片文件是否仍在接收目录中。</p></div>
+            <div class="preview-caption"><span><i class="legend-dot"></i>原图与标签在网页中叠加预览</span><span id="center-caption">归一化图像坐标</span></div>
+          </section>
+          <div class="detail-grid">
+            <section class="panel result-panel"><div class="section-heading"><h2>标签结果</h2><span id="result-hint" class="muted"></span></div><p id="result-serial" class="result-serial">—</p><dl class="result-metrics"><div><dt>图像坐标</dt><dd id="result-center">—</dd></div><div><dt>服务端处理</dt><dd id="result-duration">—</dd></div></dl><p id="delivery-note" class="delivery-note"></p></section>
+            <section class="panel metadata-panel"><div class="section-heading"><h2>接收详情</h2><button id="copy-id" class="text-button">复制请求 ID</button></div><dl class="metadata"><dt>收到图片</dt><dd id="received-at">—</dd><dt>完成响应</dt><dd id="completed-at">—</dd><dt>来源 IP</dt><dd id="source-ip" class="mono">—</dd><dt>图片大小</dt><dd id="image-size">—</dd><dt>请求 ID</dt><dd id="request-id" class="mono break">—</dd></dl></section>
+          </div>
+          <section class="panel attempts-panel"><div class="section-heading"><h2>请求与返回</h2><span id="attempt-count" class="muted"></span></div><p id="legacy-note" class="legacy-note" hidden>这张图片在网页监控启用前上传。原图和序列号已保留，当时的响应 JSON、耗时和发送状态未记录。</p><div class="table-scroll"><table id="attempt-table"><thead><tr><th>请求时间</th><th>发送状态</th><th>来源 IP</th><th>HTTP</th><th>耗时</th><th>类型</th></tr></thead><tbody id="attempt-body"></tbody></table></div><p class="table-note">记录服务端向连接写出的响应；当前协议尚未包含设备端“标签已显示”的回执。</p></section>
+          <section class="panel raw-panel"><div class="section-heading"><h2>完整响应 JSON</h2><button id="copy-json" class="text-button">复制 JSON</button></div><pre id="response-json" tabindex="0">等待响应</pre><div class="hash-row"><span>图片 SHA-256</span><code id="image-hash"></code></div></section>
+        </div>
+      </section>
+    </div>
+    </div>
+    <section id="trajectory-pane" role="tabpanel" aria-labelledby="trajectory-tab" hidden>
+      <section class="panel trajectory-panel">
+        <div class="trajectory-heading"><div><p class="eyebrow">SESSION TRAJECTORY</p><h2>从启动位置出发</h2><p id="pose-session-note" class="subtitle">每次启动独立记录，位置单位为米。</p></div><div class="session-controls"><label for="pose-session">App 会话</label><select id="pose-session"><option value="">等待会话</option></select><button id="pose-follow" class="text-button" aria-pressed="true">跟随最新会话</button></div></div>
+        <p id="pose-error" class="pose-error" role="alert" hidden></p>
+        <div class="trajectory-toolbar"><div class="pose-live-status"><i id="pose-status-dot"></i><span id="pose-status">等待设备姿态</span></div><div><button id="pose-top" class="button" aria-pressed="false">俯视 XZ</button><button id="pose-fit" class="button">适应轨迹</button><button id="pose-export" class="button" disabled>导出 JSON</button></div></div>
+        <div class="trajectory-layout">
+          <div class="trajectory-stage"><canvas id="pose-canvas" tabindex="0" aria-label="三维头部轨迹。拖动旋转视角，滚轮缩放，方向键旋转。"></canvas><div id="pose-empty" class="pose-empty"><strong>等待第一条轨迹</strong><span>新版 App 保持前台运行后，每秒自动上报一次姿态。<br>无需触发拍照。</span></div><div class="trajectory-legend"><span><i class="trace-dot"></i>运动轨迹</span><span><i class="origin-dot"></i>启动原点</span><span>朝向轴：<b class="axis-x">X 右</b> · <b class="axis-y">Y 上</b> · <b class="axis-z">Z 前</b></span></div><span class="orbit-hint">拖动旋转 · 滚轮缩放</span></div>
+          <aside class="pose-readout"><p class="eyebrow">HEAD POSE</p><h3 id="pose-time">—</h3><p id="pose-point-state" class="muted">尚无采样</p><dl><dt>位置 XYZ · m</dt><dd id="pose-position" class="mono">—</dd><dt>偏航 / 俯仰 / 滚转 · °</dt><dd id="pose-angles" class="mono">—</dd><dt>四元数 XYZW</dt><dd id="pose-quaternion" class="mono">—</dd><dt>已加载 / 会话采样</dt><dd id="pose-count">0 / 0</dd><dt>最近采样距今</dt><dd id="pose-age">—</dd><dt>来源 IP</dt><dd id="pose-ip" class="mono">—</dd></dl></aside>
+        </div>
+        <div class="pose-playback"><label class="check"><input id="pose-live" type="checkbox" checked> 跟随最新采样</label><input id="pose-scrub" type="range" min="0" max="0" value="0" disabled aria-label="回看姿态采样"><span id="pose-progress" class="mono">0 / 0</span></div>
+        <p class="trajectory-note">原点为本次启动后的首次有效定位；X 向右、Y 向上、Z 为启动时水平朝向。追踪丢失或采样间断时断开轨迹。该图是头部位姿记录，不是房间地图，也不是跨会话共享的绝对坐标。</p>
+      </section>
+    </section>
+    <footer>HoloLensCaptureDemo <span>·</span> 此查看页仅在接收电脑本机开放 <span>·</span> 图片、响应与轨迹保存在本地</footer>
+  </main>
+  <dialog id="clear-dialog" class="clear-dialog" aria-labelledby="clear-title" aria-describedby="clear-description">
+    <h2 id="clear-title">清除全部记录？</h2>
+    <p id="clear-description">将删除电脑上保存的全部上传记录、JPEG 原图及响应结果，包括当前搜索范围之外的记录。此操作无法撤销。</p>
+    <p class="clear-note">序列号继续递增，空间轨迹保留。头显中已有的标签和待上传照片不受影响；恢复通信后，暂存照片仍会上传。</p>
+    <p id="clear-error" class="clear-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="cancel-clear" class="button" autofocus>取消</button><button id="confirm-clear" class="button danger-solid">确认清除</button></div>
+  </dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>

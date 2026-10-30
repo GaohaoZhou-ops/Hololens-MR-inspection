@@ -1,0 +1,10 @@
+{
+  "serverUrl": "http://YOUR_PC_LAN_IP:8765",
+  "apiToken": "generated-by-Configure-Lan.ps1",
+  "distanceMeters": 2.0,
+  "requestTimeoutSeconds": 15,
+  "maxLabels": 12,
+  "maxQueuedCaptures": 20,
+  "maxQueueMegabytes": 64,
+  "simulateCamera": false
+}

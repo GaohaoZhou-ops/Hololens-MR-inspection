@@ -1,0 +1,9 @@
+<Project>
+  <!-- VS 2019's extension SDK resolver otherwise searches Program Files only.
+       Read the actual Windows SDK root without changing machine-wide settings. -->
+  <PropertyGroup Condition="'$(OS)' == 'Windows_NT'">
+    <HoloLensWindowsSdkRoot>$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Wow6432Node\Microsoft\Windows Kits\Installed Roots@KitsRoot10)</HoloLensWindowsSdkRoot>
+    <HoloLensWindowsSdkRoot Condition="'$(HoloLensWindowsSdkRoot)' == ''">$(Registry:HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows Kits\Installed Roots@KitsRoot10)</HoloLensWindowsSdkRoot>
+    <SDKExtensionDirectoryRoot Condition="'$(SDKExtensionDirectoryRoot)' == '' and Exists('$(HoloLensWindowsSdkRoot)Extension SDKs')">$(MSBuildProgramFiles32)\Microsoft SDKs\Windows Kits\10;$(MSBuildProgramFiles32)\Windows Kits\10;$(HoloLensWindowsSdkRoot)</SDKExtensionDirectoryRoot>
+  </PropertyGroup>
+</Project>

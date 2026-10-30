@@ -1,0 +1,91 @@
+# Unity caches and generated output (keep Assets, its source .meta files,
+# Packages including packages-lock.json, and ProjectSettings in Git).
+/[Ll]ibrary/
+/[Tt]emp/
+/[Oo]bj/
+/[Bb]in/
+/[Ll]ogs/
+/[Uu]ser[Ss]ettings/
+/[Bb]uild/
+/[Bb]uilds/
+/[Mm]emoryCaptures/
+/[Rr]ecordings/
+/*_BackUpThisFolder_ButDontShipItWithYourGame/
+/*_BurstDebugInformation_DoNotShip/
+/sysinfo.txt
+
+# Generated IDE projects and per-user settings; keep .vsconfig.
+.vs/
+.idea/
+*.csproj
+*.unityproj
+*.sln
+*.slnx
+*.suo
+*.user
+*.userosscache
+*.sln.docstates
+*.pidb
+*.opendb
+*.VC.db
+
+# UWP packages contain the generated client configuration and pairing token.
+AppPackages/
+*.appx
+*.appxbundle
+*.appxupload
+*.msix
+*.msixbundle
+*.msixupload
+
+# Device photos, pose history, databases, queues and diagnostic logs.
+/server/data/
+*.log
+*.binlog
+
+# Machine-specific configuration and credentials. Keep example templates.
+/config/*.local.json
+/config/*.local.json.meta
+/Assets/StreamingAssets/demo-config.json
+/Assets/StreamingAssets/demo-config.json.meta
+.env
+.env.*
+!.env.example
+!.env.template
+
+# Local signing certificates/keys and Unity license files (including Unity meta).
+*.pfx
+*.pfx.meta
+*.p12
+*.p12.meta
+*.key
+*.key.meta
+*.snk
+*.snk.meta
+*.cer
+*.cer.meta
+*.ulf
+*.alf
+
+# Python runtime, virtual environments and test/tool caches.
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# Operating-system and editor temporary files.
+.DS_Store
+Thumbs.db
+Desktop.ini
+*~
+*.swp
+*.swo
