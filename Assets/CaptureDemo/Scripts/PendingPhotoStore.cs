@@ -101,6 +101,13 @@ namespace HoloLensCaptureDemo
             TryCleanup(sent);
         }
 
+        public int ClearPending()
+        {
+            int count = 0;
+            foreach (var photo in items.ToArray()) { Complete(photo); count++; }
+            return count;
+        }
+
         private static string Hash(byte[] image)
         {
             using (var sha = SHA256.Create()) return BitConverter.ToString(sha.ComputeHash(image)).Replace("-", "").ToLowerInvariant();

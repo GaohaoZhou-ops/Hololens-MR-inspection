@@ -42,6 +42,20 @@ namespace HoloLensCaptureDemo
         private readonly int capacity;
         private Segment active;
         public int Count { get { return segments.Sum(s => s.samples.Count); } }
+        public long StoredBytes { get { return Directory.GetFiles(directory, "*.jsonl").Sum(p => new FileInfo(p).Length); } }
+
+        public int ClearPending()
+        {
+            int count = 0;
+            foreach (var segment in segments.ToArray())
+            {
+                File.Delete(segment.path);
+                count += segment.samples.Count;
+                segments.Remove(segment);
+                if (active == segment) active = null;
+            }
+            return count;
+        }
 
         public PoseOutbox(string directory, int capacity = Capacity)
         {

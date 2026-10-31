@@ -8,6 +8,7 @@
   <link rel="stylesheet" href="/style.css">
   <script src="/app.js" defer></script>
   <script src="/trajectory.js" defer></script>
+  <script src="/history.js" defer></script>
 </head>
 <body>
   <header class="topbar">
@@ -17,9 +18,17 @@
   <main>
     <section class="page-heading">
       <div><p class="eyebrow">HOLOLENS MONITOR</p><h1>画面、标签与轨迹</h1><p class="subtitle">核对上传画面与返回结果，查看设备的空间运动。</p></div>
-      <div class="page-actions"><span id="updated-at" class="muted">等待首次更新</span><button id="auto-toggle" class="button" aria-pressed="true">自动刷新 · 开</button><button id="refresh" class="button primary">立即刷新</button><button id="clear-history" class="button danger" disabled>清除图片记录</button></div>
+      <div class="page-actions"><span id="updated-at" class="muted">等待首次更新</span><button id="auto-toggle" class="button" aria-pressed="true">自动刷新 · 开</button><button id="refresh" class="button primary">立即刷新</button><a class="button" href="/system-live">系统直播</a><button id="manage-cache" class="button">清理缓存</button><button id="clear-history" class="button danger" disabled>清除图片记录</button></div>
     </section>
     <div id="error-banner" class="error-banner" role="alert" hidden></div>
+    <section class="panel work-panel" aria-labelledby="work-heading">
+      <div class="section-heading"><h2 id="work-heading">工作历史与恢复</h2><span id="work-connection" class="muted">等待新版 App 连接</span></div>
+      <div class="work-controls"><label>目标设备<select id="work-device"><option value="">等待设备</option></select></label><label>电脑上的工作<select id="work-select"><option value="">暂无工作</option></select></label><button id="resume-work" class="button primary" disabled>恢复工作到头显</button></div>
+      <p id="work-summary" class="muted">新照片的标签和空间锚点会自动归档。旧版未保存空间锚点的照片只能查看，不能恢复原位置。</p>
+      <div class="work-new"><input id="new-work-title" maxlength="80" placeholder="新工作名称（可选）" aria-label="新工作名称"><button id="new-work" class="button" disabled>开始新工作</button></div>
+      <p id="work-device-status" class="work-status" role="status">请在 HoloLens 上打开新版 App，并保持前台运行。</p><p id="work-command-status" class="work-status" role="status"></p><p id="work-error" class="clear-error" hidden></p>
+      <p class="work-note">恢复时下载标签和空间锚点，原图留在电脑；默认恢复最近 12 个标签。回到原拍摄区域并环顾四周，未定位的标签会保持隐藏。</p>
+    </section>
     <nav class="view-tabs" role="tablist" aria-label="监控视图"><button id="capture-tab" role="tab" aria-controls="capture-pane" aria-selected="true">画面与标签</button><button id="trajectory-tab" role="tab" aria-controls="trajectory-pane" aria-selected="false">空间轨迹 <span>1 Hz</span></button></nav>
     <div id="capture-pane" role="tabpanel" aria-labelledby="capture-tab">
     <section class="stats" aria-label="接收统计">
@@ -79,5 +88,22 @@
     <div class="dialog-actions"><button id="cancel-clear" class="button" autofocus>取消</button><button id="confirm-clear" class="button danger-solid">确认清除</button></div>
   </dialog>
   <div id="toast" class="toast" role="status" hidden></div>
+  <dialog id="cache-dialog" class="clear-dialog cache-dialog" aria-labelledby="cache-title">
+    <h2 id="cache-title">选择要清理的缓存</h2><p>仅处理勾选的类别。电脑上的工作标签和空间锚点归档始终保留。</p>
+    <fieldset><legend>电脑端</legend>
+      <label class="cache-choice"><input type="checkbox" data-cache-scope="computer" value="images" data-loss="true"><span><strong>历史照片原图 <small id="cache-computer-images"></small></strong><small>删除 JPEG 文件；标签、工作归档仍可恢复，原图将无法再查看或下载。</small></span></label>
+      <label class="cache-choice"><input type="checkbox" data-cache-scope="computer" value="poses" data-loss="true"><span><strong>历史姿态轨迹 <small id="cache-computer-poses"></small></strong><small>删除已收到的轨迹；正在运行的 App 会继续发送新的采样。不影响空间锚点。</small></span></label>
+    </fieldset>
+    <fieldset><legend id="cache-device-title">头显端</legend>
+      <label class="cache-choice"><input type="checkbox" data-cache-scope="device" value="downloadedAnchors"><span><strong>已下载的历史锚点 <small id="cache-device-downloads"></small></strong><small>可再次从电脑下载；清理后离线时无法从该缓存恢复。</small></span></label>
+      <label class="cache-choice"><input type="checkbox" data-cache-scope="device" value="visibleLabels"><span><strong>当前显示的标签 <small id="cache-device-labels"></small></strong><small>释放显示对象占用的内存；不会删除电脑归档和待上传标签。</small></span></label>
+      <label class="cache-choice"><input type="checkbox" data-cache-scope="device" value="pendingPhotos" data-loss="true"><span><strong>未上传照片 <small id="cache-device-photos"></small></strong><small>可能尚未在电脑保存，将丢失这些照片及其未归档空间位置。</small></span></label>
+      <label class="cache-choice"><input type="checkbox" data-cache-scope="device" value="pendingPoses" data-loss="true"><span><strong>未上传姿态 <small id="cache-device-poses"></small></strong><small>将丢失尚未同步的轨迹点；后续新采样继续。</small></span></label>
+    </fieldset>
+    <p id="cache-device-note" class="muted"></p>
+    <label id="cache-loss-label" class="cache-choice" hidden><input id="cache-confirm-loss" type="checkbox"><span>我确认删除所选原图、轨迹或未上传数据，理解这些数据无法从本次清理中恢复。</span></label>
+    <p id="cache-error" class="clear-error" role="alert" hidden></p>
+    <div class="dialog-actions"><button id="cancel-cache" class="button" autofocus>取消</button><button id="confirm-cache" class="button danger-solid" disabled>清理所选项</button></div>
+  </dialog>
 </body>
 </html>

@@ -225,10 +225,11 @@ class ReceiverTests(unittest.TestCase):
             self.assertEqual(self.get("/api/captures?" + query)[0], 400)
 
     def test_dashboard_access_and_paths_do_not_expose_private_files_or_tokens(self):
-        for path in ("/", "/app.js", "/style.css", "/favicon.svg"):
-            status, _, body = self.get(path)
+        for path in ("/", "/app.js", "/style.css", "/favicon.svg", "/system-live", "/system-live.js", "/system-live.css"):
+            status, headers, body = self.get(path)
             self.assertEqual(status, 200)
             self.assertNotIn(TOKEN.encode(), body)
+            self.assertEqual("media-src 'self' https:" in headers["Content-Security-Policy"], path == "/system-live")
         self.assertEqual(self.get("/api/captures", {"Host": "untrusted.example"})[0], 403)
         self.assertEqual(self.get("/api/captures", {"Origin": "https://untrusted.example"})[0], 403)
         handler = object.__new__(receiver.CaptureHandler)
@@ -275,6 +276,13 @@ class ReceiverTests(unittest.TestCase):
         unrelated = Path(self.directory.name) / "images" / "keep.txt"
         unrelated.write_text("not a capture")
         status, result = self.clear()
+        # The response/audit can be visible just before the upload handler's
+        # finally block releases its slot. A busy clear is an expected response.
+        deadline = time.monotonic() + 2
+        while status == 409 and time.monotonic() < deadline:
+            self.assertEqual(result["error"], "uploads_in_progress")
+            time.sleep(.01)
+            status, result = self.clear()
         self.assertEqual(status, 200)
         self.assertEqual(result["deletedCaptures"], 2)
         self.assertEqual(result["deletedAttempts"], 2)

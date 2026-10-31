@@ -14,6 +14,7 @@ namespace HoloLensCaptureDemo
         private WorldAnchor anchor;
 #endif
         public string Serial { get; private set; }
+        public string CaptureId { get; set; }
         public bool IsLocated
         {
             get
@@ -57,6 +58,18 @@ namespace HoloLensCaptureDemo
         }
 
 #if UNITY_WSA && !UNITY_EDITOR
+        public WorldAnchor SpatialAnchor { get { return anchor; } }
+
+        public static AnchoredLabel Import(UnityEngine.XR.WSA.Sharing.WorldAnchorTransferBatch batch, string id)
+        {
+            var label = CreateVisual(Vector3.zero);
+            try { label.anchor = batch.LockObject(id, label.gameObject); }
+            catch (System.Exception) { Destroy(label.gameObject); throw; }
+            if (label.anchor != null) return label;
+            Destroy(label.gameObject);
+            return null;
+        }
+
         public bool SavePending(WorldAnchorStore store, string id)
         {
             return store != null && anchor != null && anchor.isLocated && store.Save(id, anchor);
@@ -81,6 +94,8 @@ namespace HoloLensCaptureDemo
             text.text = serial;
             hasResult = true;
         }
+
+        public void HideResult() { hasResult = false; if (text != null) text.gameObject.SetActive(false); }
 
         private void LateUpdate()
         {

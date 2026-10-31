@@ -96,8 +96,7 @@ namespace HoloLensCaptureDemo.Editor
             camera.farClipPlane = 20f;
             camera.fieldOfView = 40f;
             camera.gameObject.AddComponent<EditorCameraMovement>();
-            var controller = new GameObject("Photo capture controller").AddComponent<CaptureController>();
-            controller.statusText = CreateText("Status HUD", camera.transform, new Vector3(0f, -0.18f, 1.4f), "Starting...", 0.003f);
+            new GameObject("Photo capture controller").AddComponent<CaptureController>();
             CreateText("Center reticle", camera.transform, new Vector3(0f, 0f, 1.2f), "+", 0.003f);
             Lightmapping.giWorkflowMode = Lightmapping.GIWorkflowMode.OnDemand;
             Lightmapping.realtimeGI = false;
@@ -178,6 +177,17 @@ namespace HoloLensCaptureDemo.Editor
             Configure();
             EditorSceneManager.OpenScene(ScenePath);
             DemoPoseSmokeTest.Begin();
+        }
+
+        public static void HistorySmokeTest()
+        {
+            Configure();
+            EditorSceneManager.OpenScene(ScenePath);
+            DemoHistorySmokeTest.Begin();
+        }
+        public static void CaptureSmokeTest()
+        {
+            Configure(); EditorSceneManager.OpenScene(ScenePath); DemoCaptureSmokeTest.Begin();
         }
     }
 }

@@ -3,6 +3,7 @@
   const $ = id => document.getElementById(id);
   const canvas = $("pose-canvas"), ctx = canvas.getContext("2d");
   let sessions = [], selected = "", points = [], cursor = -1, follow = true, auto = true;
+  let historyRevision = null;
   let busy = false, pending = false, generation = 0, yaw = -0.65, elevation = 0.65, zoom = 1, top = false;
   const stamp = s => new Date(s).toLocaleString("zh-CN", {hour12:false});
   const fmt = (n, digits=3) => Number(n).toFixed(digits);
@@ -21,6 +22,9 @@
     busy=true;
     try {
       const list=await api("/api/pose-sessions");sessions=list.sessions;
+      const revision=list.historyRevision??0;
+      if ((historyRevision!==null&&revision!==historyRevision) || (selected&&!sessions.some(s=>s.sessionId===selected))) selectSession("");
+      historyRevision=revision;
       if (follow && sessions.length && selected!==sessions[0].sessionId) selectSession(sessions[0].sessionId);
       if (!selected && sessions.length) selectSession(sessions[0].sessionId);
       const signature=sessions.map(s=>s.sessionId).join();
@@ -37,6 +41,8 @@
       if (id) for (let page=0;page<10;page++) {
         const result=await api(`/api/pose-sessions/${id}?after=${cursor}&limit=2000`);
         if (currentGeneration!==generation) {pending=true;return;}
+        // A clear followed by a new sample may recreate the very same session ID.
+        if ((result.historyRevision??0)!==historyRevision) {selectSession("");pending=true;return;}
         points.push(...result.samples);cursor=result.nextAfter;
         if (!result.hasMore) break;
       }

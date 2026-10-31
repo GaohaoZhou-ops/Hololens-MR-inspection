@@ -71,7 +71,11 @@ function renderDetail(c) {
   if(current?.captureId!==c.captureId)selectedAttemptId=null;
   current=c;$("empty-state").hidden=true;$("capture-view").hidden=false;
   $("capture-title").textContent=c.serial;$("capture-state").textContent=stateNames[c.state]||c.state;$("capture-state").dataset.state=c.state;
-  if($("capture-image").getAttribute("src")!==c.imageUrl) {
+  if(c.imageAvailable===false) {
+    $("capture-image").removeAttribute("src");$("capture-image").hidden=true;$("image-error").hidden=false;
+    $("image-error").textContent="原图已清理，标签结果和空间归档仍保留。";
+  } else if($("capture-image").getAttribute("src")!==c.imageUrl) {
+    $("image-error").textContent="无法读取原图，请检查图片文件是否仍在接收目录中。";
     $("image-error").hidden=true;$("capture-image").hidden=false;
     $("image-dimensions").textContent="JPEG 原图";
     $("capture-image").alt=`${c.serial} 设备上传的原始画面`;
@@ -79,6 +83,7 @@ function renderDetail(c) {
   }
   $("download-image").href=c.imageUrl+"?download=1";
   $("download-image").download=c.serial+".jpg";
+  $("download-image").hidden=c.imageAvailable===false;
   $("result-serial").textContent=c.response?.serial || c.serial;
   $("result-hint").textContent=c.state==="legacy"?"数据库序列号":c.state==="processing"?"等待返回":"服务端结果";
   $("result-center").textContent=c.response && Number.isFinite(c.response.centerX) && Number.isFinite(c.response.centerY) ? `(${c.response.centerX.toFixed(3)}, ${c.response.centerY.toFixed(3)})` : "未记录";
@@ -172,14 +177,14 @@ function toast(message,ms=2200) {$("toast").textContent=message;$("toast").hidde
 $("capture-image").addEventListener("load",()=>{$("image-dimensions").textContent=`${$("capture-image").naturalWidth} × ${$("capture-image").naturalHeight} · JPEG`;renderOverlay();});
 $("capture-image").addEventListener("error",()=>{$("image-error").hidden=false;$("capture-image").hidden=true;renderOverlay();});
 $("overlay-toggle").addEventListener("change",renderOverlay);
-$("refresh").addEventListener("click",()=>{refresh();window.poseMonitor?.refresh();});
+$("refresh").addEventListener("click",()=>{refresh();window.poseMonitor?.refresh();window.historyMonitor?.refresh();});
 $("clear-history").addEventListener("click",()=>{$("clear-error").hidden=true;$("clear-dialog").showModal();});
 $("cancel-clear").addEventListener("click",()=>$("clear-dialog").close());
 $("confirm-clear").addEventListener("click",clearHistory);
 $("clear-dialog").addEventListener("cancel",event=>{if(clearing)event.preventDefault();});
 $("load-more").addEventListener("click",()=>refresh(true));
 $("follow-latest").addEventListener("click",()=>{following=true;syncFollowing();refresh();});
-$("auto-toggle").addEventListener("click",()=>{automatic=!automatic;$("auto-toggle").setAttribute("aria-pressed",String(automatic));$("auto-toggle").textContent="自动刷新 · "+(automatic?"开":"关");window.poseMonitor?.setAutomatic(automatic);if(automatic)refresh();});
+$("auto-toggle").addEventListener("click",()=>{automatic=!automatic;$("auto-toggle").setAttribute("aria-pressed",String(automatic));$("auto-toggle").textContent="自动刷新 · "+(automatic?"开":"关");window.poseMonitor?.setAutomatic(automatic);window.historyMonitor?.setAutomatic(automatic);if(automatic)refresh();});
 $("search").addEventListener("input",()=>{clearTimeout(searchTimer);searchTimer=setTimeout(()=>{query=$("search").value.trim();generation++;captures=new Map();selectedId=null;current=null;selectedAttemptId=null;nextBefore=null;following=true;$("capture-view").hidden=true;syncFollowing();renderList();refresh();},250);});
 $("copy-id").addEventListener("click",()=>{if(current)copy(current.captureId);});
 $("copy-json").addEventListener("click",()=>copy($("response-json").textContent));

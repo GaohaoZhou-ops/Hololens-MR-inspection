@@ -960,3 +960,23 @@ tr[role=button]:focus-visible {
 @media(max-width:680px){.trajectory-heading{padding:20px 18px}.trajectory-toolbar{padding:12px 18px;align-items:flex-start;flex-wrap:wrap}.trajectory-layout{grid-template-columns:minmax(0,1fr)}#pose-canvas{height:340px}.trajectory-legend{gap:9px;font-size:9px}.pose-readout{padding:20px 18px}.pose-readout dl{display:grid;grid-template-columns:1fr 1fr;gap:5px 10px;margin-top:14px}.pose-readout dt{margin-top:8px}.pose-readout dd{margin-top:8px}.pose-playback{padding:16px 18px;gap:10px;flex-wrap:wrap}.pose-playback input[type=range]{order:3;flex-basis:100%}.trajectory-note{padding:0 18px 20px}.session-controls{gap:8px}.session-controls label{width:100%}.orbit-hint{font-size:9px}}
 #pose-top[aria-pressed=false]{background:#fff;color:#365654}
 #pose-top[aria-pressed=true]{background:#e1f1eb;color:#127f72;border-color:#a5d7c5}
+
+.work-panel {padding:22px 26px;margin:0 0 24px}
+.work-controls {display:flex;align-items:end;gap:14px;flex-wrap:wrap}
+.work-controls label {display:grid;gap:7px;flex:1;min-width:190px;color:var(--muted);font-size:13px}
+.work-controls select,.work-new input {font:inherit;color:var(--ink);border:1px solid var(--line);border-radius:8px;background:#fff;padding:10px;min-width:0;max-width:100%}
+.work-new {display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+.work-new input {flex:1;max-width:360px}
+.work-status {font-size:13px;margin:12px 0 0;overflow-wrap:anywhere}
+.work-note {font-size:12px;color:var(--muted);line-height:1.7;margin:12px 0 0}
+.cache-dialog {width:min(650px,calc(100vw - 32px));max-height:90vh;overflow:auto}
+.cache-dialog fieldset {border:1px solid var(--line);border-radius:10px;margin:18px 0;padding:10px 16px}
+.cache-dialog legend {color:var(--ink);font-weight:600;padding:0 6px}
+.cache-choice {display:flex;align-items:flex-start;gap:10px;margin:14px 0;font-size:14px;line-height:1.6}
+.cache-choice input {margin-top:5px;flex-shrink:0}
+.cache-choice span {display:grid;gap:3px}
+.cache-choice small {display:block;color:var(--muted);font-size:12px;font-weight:400}
+.cache-choice strong small {display:inline;margin-left:8px}
+.cache-choice:has(input:disabled) {opacity:.5}
+.cache-dialog .dialog-actions {position:sticky;bottom:-24px;background:#fff;padding:14px 0;margin-bottom:0}
+@media(max-width:700px){.work-panel {padding:18px}.work-controls {align-items:stretch}.work-controls label {flex-basis:100%}.work-controls .button {width:100%}.work-new input {max-width:none}.cache-choice strong small {display:block;margin-left:0}}

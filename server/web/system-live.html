@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="referrer" content="no-referrer">
+  <title>HoloLens · 系统直播</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/style.css">
+  <link rel="stylesheet" href="/system-live.css">
+  <script src="/system-live.js" defer></script>
+</head>
+<body>
+  <header class="topbar"><div class="brand"><span class="brand-mark" aria-hidden="true">H<span>1</span></span><div><strong>HoloLens</strong><span class="brand-divider">/</span><span>系统直播</span></div></div><a href="/" class="live-back">返回照片与轨迹</a></header>
+  <main>
+    <section class="page-heading"><div><p class="eyebrow">DEVICE PORTAL LIVE PREVIEW</p><h1>看看头显眼前的画面</h1><p class="subtitle">直接在本页查看头显画面。拍照时自动暂停，拍完自动恢复。</p></div></section>
+    <p class="live-notice"><strong>新版 App 支持合拢即拍，直播自动暂停和恢复。</strong>请保留本页打开，并关闭旧版直播窗口。本页会在头显拍照时自动让出摄像头。</p>
+    <div class="live-layout">
+      <section class="panel live-settings" aria-labelledby="live-settings-title">
+        <h2 id="live-settings-title">连接与画质</h2>
+        <label class="live-field" for="live-address">头显 IPv4 地址<input id="live-address" type="text" inputmode="decimal" placeholder="例如 192.168.100.61" autocomplete="off" spellcheck="false" maxlength="15"></label>
+        <label class="live-field" for="live-quality">直播画质<select id="live-quality"><option value="low">低 · 428 × 240 / 15 fps / 0.6 Mbps</option><option value="med" selected>中 · 854 × 480 / 30 fps / 2.5 Mbps</option><option value="high">高 · 1280 × 720 / 30 fps / 5 Mbps</option></select></label>
+        <label class="check"><input id="live-holograms" type="checkbox" checked> 包含全息标签与应用界面</label>
+        <p class="live-muted">关闭上面的选项可只看摄像头画面。麦克风和应用音频均关闭；本入口不录制或保存视频。</p>
+        <div class="live-actions"><button id="live-login" class="button">设备门户登录 ↗</button><button id="live-start" class="button primary">开始直播</button><button id="live-stop" class="button" disabled>停止直播</button></div>
+        <p id="live-error" class="clear-error" role="alert" hidden></p>
+        <p id="live-status" class="live-status" role="status">等待开始。已登录设备门户时可直接开始直播。</p>
+        <p class="live-muted">停止直播会释放摄像头。离开或刷新本页也会停止播放；旧版直播窗口请先关闭。自动拍照切换适用于 App 1.0.10.0 及以上版本。</p>
+      </section>
+      <div class="live-view">
+        <section id="live-player" class="panel live-player" data-state="idle" aria-label="头显实时画面">
+          <div class="live-player-bar"><span class="live-player-indicator" aria-hidden="true"></span><strong id="live-player-state" aria-live="polite">直播未开启</strong><span id="live-resolution" class="mono"></span><button id="live-fullscreen" class="button" disabled>全屏</button></div>
+          <div class="live-video-stage">
+            <div id="live-video-slot"></div>
+            <div id="live-placeholder" class="live-placeholder"><span class="live-viewfinder" aria-hidden="true">＋</span><strong id="live-placeholder-title">直播未开启</strong><p id="live-placeholder-detail">点击“开始直播”，画面将在这里显示。</p><button id="live-play" class="button primary" hidden>继续播放</button></div>
+          </div>
+          <div class="live-player-foot"><span>本机参考时钟 <output id="live-clock" class="mono">—</output></span><span>无音频 · 不录制</span></div>
+        </section>
+        <details class="panel live-guide">
+          <summary>连接说明与画面调试</summary>
+          <ol><li><strong>保持设备唤醒并连接同一 Wi-Fi。</strong>在头显开发者选项中开启 Device Portal。</li><li><strong>首次使用先登录。</strong>“设备门户登录”会打开官方登录页。完成登录和证书确认后，回到本页点“开始直播”；视频直接在上方播放。</li><li><strong>在 App 内合拢一次。</strong>本页显示拍照提示，头显拍一张并保存，随后画面自动恢复。保持合拢不会连拍。</li><li><strong>按需切换画质。</strong>修改选项后点“重新开始直播”。让头显拍到下方参考时钟，可将画面中的时间与本机时间比较，估算延迟。</li></ol>
+          <p class="live-muted">画质菜单为官方接口的标称档位，不代表已测得的帧率或延迟。系统合成视角与眼睛看到的视角可能不同，不能单凭直播判断空间标签精度。</p>
+        </details>
+      </div>
+    </div>
+    <section class="panel live-fallback"><h2>画面无法播放时</h2><p>先点击“设备门户登录”，确认设备地址并完成登录、证书提示，再回到本页重新开始。若浏览器请求访问本地网络，请允许本页连接头显。如果设备门户也打不开，检查休眠、IP 变化及 Wi-Fi 是否允许设备互访。</p><p>直播由浏览器直接连接头显；照片接收、历史工作和轨迹仍由电脑端服务处理。本页面只记住设备地址和画质选项。</p></section>
+    <footer>HoloLensCaptureDemo <span>·</span> 系统直播调试版 <span>·</span> 不录制 · 不运行推理</footer>
+  </main>
+</body>
+</html>

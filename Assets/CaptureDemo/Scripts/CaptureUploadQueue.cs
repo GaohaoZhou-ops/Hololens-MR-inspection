@@ -17,6 +17,7 @@ namespace HoloLensCaptureDemo
         public bool IsPaused { get; private set; }
         public int ProbeCount { get; private set; }
         public int UploadAttempts { get; private set; }
+        public bool IsRequestActive { get { return activeRequest != null; } }
         private readonly PendingPhotoStore store;
         private readonly DemoConfig config;
         private readonly Action<PendingPhoto, CaptureResponse> uploaded;

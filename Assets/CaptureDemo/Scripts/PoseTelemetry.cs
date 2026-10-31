@@ -13,6 +13,14 @@ namespace HoloLensCaptureDemo
     {
         public string SessionId { get { return session == null ? null : session.sessionId; } }
         public int PendingCount { get { return outbox == null ? 0 : outbox.Count; } }
+        public long PendingBytes { get { return outbox == null ? 0 : outbox.StoredBytes; } }
+        public bool IsRequestActive { get { return request != null; } }
+        public bool TryClearPending()
+        {
+            if (request != null) return false;
+            if (outbox != null) { DroppedSamples += outbox.ClearPending(); segment++; }
+            return true;
+        }
         public int SampleCount { get; private set; }
         public int DroppedSamples { get; private set; }
         public string State { get; private set; }

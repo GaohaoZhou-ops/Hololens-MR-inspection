@@ -37,6 +37,8 @@ AppPackages/
 *.msix
 *.msixbundle
 *.msixupload
+*.appxsym
+*.appxrecipe
 
 # Device photos, pose history, databases, queues and diagnostic logs.
 /server/data/
@@ -45,7 +47,17 @@ AppPackages/
 *.sqlite3
 *.sqlite-*
 *.sqlite3-*
-**/images/HL1-[0-9]*-*.jpg
+# Include originals downloaded from the monitor into other project folders.
+HL1-[0-9]*-*.jpg
+HL1-[0-9]*-*.jpg.meta
+.clear-pending/
+# Copied headset/editor queues include device identity, photos and spatial data.
+CaptureOutbox*/
+CaptureOutbox*.meta
+editor-outbox*/
+editor-outbox*.meta
+*.anchor
+*.anchor.meta
 *.log
 *.binlog
 
@@ -74,7 +86,9 @@ AppPackages/
 *.cer
 *.cer.meta
 *.ulf
+*.ulf.meta
 *.alf
+*.alf.meta
 
 # Python runtime, virtual environments and test/tool caches.
 __pycache__/
@@ -103,3 +117,5 @@ Desktop.ini
 *~
 *.swp
 *.swo
+*.tmp
+*.tmp.meta

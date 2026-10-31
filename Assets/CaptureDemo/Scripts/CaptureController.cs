@@ -37,7 +37,7 @@ namespace HoloLensCaptureDemo
 
     public sealed class CaptureController : MonoBehaviour
     {
-        public TextMesh statusText;
+        public string StatusMessage { get; private set; }
         public DemoConfig Config { get; private set; }
         public bool IsReady { get; private set; }
         public bool IsCapturing { get; private set; }
@@ -59,6 +59,10 @@ namespace HoloLensCaptureDemo
             }
         }
         public IReadOnlyList<AnchoredLabel> Labels { get { return labels; } }
+        public WorkHistoryClient History { get; private set; }
+        public long PendingPhotoBytes { get { return outbox == null ? 0 : outbox.StoredBytes; } }
+        public bool UploadActive { get { return uploader != null && uploader.IsRequestActive; } }
+        public bool IsPhotoPending(string id) { return outbox != null && outbox.Items.Any(photo => photo.captureId == id); }
 
         private readonly List<AnchoredLabel> labels = new List<AnchoredLabel>();
         private readonly Dictionary<string, AnchoredLabel> pendingLabels = new Dictionary<string, AnchoredLabel>();
@@ -66,12 +70,15 @@ namespace HoloLensCaptureDemo
         private CaptureUploadQueue uploader;
         private AnchoredLabel captureLabel;
         private string captureMessage;
-        private Font statusFont;
         private const string AnchorPrefix = "capture-pending-";
         private bool disposed;
         private int simulationNumber;
+        private float nextHistoryStatus;
+        private readonly CapturePressGate pressGate = new CapturePressGate();
+        private bool handoffActive, applicationPaused;
+        private CameraCaptureLease cameraLease;
 #if UNITY_WSA && !UNITY_EDITOR
-        private GestureRecognizer gestures;
+        private bool inputSubscribed;
         private PhotoCapture cameraCapture;
         private bool photoMode;
         private WorldAnchorStore anchorStore;
@@ -79,15 +86,6 @@ namespace HoloLensCaptureDemo
 
         private void Awake()
         {
-            if (statusText != null)
-            {
-                statusFont = Font.CreateDynamicFontFromOSFont(new[] { "Microsoft YaHei UI", "Microsoft YaHei", "Segoe UI", "Arial" }, 40);
-                if (statusFont != null)
-                {
-                    statusText.font = statusFont;
-                    statusText.GetComponent<MeshRenderer>().sharedMaterial = statusFont.material;
-                }
-            }
             var camera = Camera.main;
             if (camera != null && camera.GetComponent<NetworkStatusHud>() == null)
                 camera.gameObject.AddComponent<NetworkStatusHud>();
@@ -102,6 +100,12 @@ namespace HoloLensCaptureDemo
             {
                 configText = File.ReadAllText(Path.Combine(Application.streamingAssetsPath, "demo-config.json"));
                 Config = JsonUtility.FromJson<DemoConfig>(configText);
+#if UNITY_EDITOR
+                var testServer = Environment.GetEnvironmentVariable("HOLOLENS_DEMO_SERVER_URL");
+                var testToken = Environment.GetEnvironmentVariable("HOLOLENS_DEMO_API_TOKEN");
+                if (!string.IsNullOrEmpty(testServer)) Config.serverUrl = testServer;
+                if (!string.IsNullOrEmpty(testToken)) Config.apiToken = testToken;
+#endif
                 Uri endpoint;
                 if (Config == null || !Uri.TryCreate(Config.serverUrl, UriKind.Absolute, out endpoint) ||
                     (endpoint.Scheme != "http" && endpoint.Scheme != "https") ||
@@ -131,6 +135,16 @@ namespace HoloLensCaptureDemo
                 SetStatus("Configuration error\n" + configError);
                 yield break;
             }
+            try
+            {
+                History = gameObject.AddComponent<WorkHistoryClient>();
+                History.Initialize(this, Config, outbox.DirectoryPath + "-history");
+            }
+            catch (Exception error)
+            {
+                configError = "History initialization: " + error.Message;
+            }
+            if (configError != null) { LastError = configError; SetStatus(LastError); yield break; }
 #if UNITY_EDITOR
             if (Environment.GetEnvironmentVariable("HOLOLENS_DEMO_DISABLE_POSE") != "1")
 #endif
@@ -142,6 +156,7 @@ namespace HoloLensCaptureDemo
             if (anchorStore != null)
             {
                 var pendingIds = new HashSet<string>(outbox.Items.Select(item => AnchorPrefix + item.captureId));
+                foreach (var id in History.PendingIds) pendingIds.Add(AnchorPrefix + id);
                 foreach (var id in anchorStore.GetAllIds())
                     if (id.StartsWith(AnchorPrefix) && !pendingIds.Contains(id)) ForgetAnchor(id);
                 foreach (var item in outbox.Items)
@@ -150,39 +165,74 @@ namespace HoloLensCaptureDemo
                     if (label != null) pendingLabels[item.captureId] = label;
                 }
             }
-            gestures = new GestureRecognizer();
-            gestures.SetRecognizableGestures(GestureSettings.Tap);
-            gestures.Tapped += OnTapped;
-            gestures.StartCapturingGestures();
+            SubscribeInput();
 #endif
             uploader = new CaptureUploadQueue(outbox, Config, Uploaded, ReadyStatus);
             IsReady = true;
             ReadyStatus();
             StartCoroutine(uploader.Run());
+            History.Begin();
         }
 
         private void Update()
         {
+            if (History != null && Time.realtimeSinceStartup >= nextHistoryStatus)
+            {
+                nextHistoryStatus = Time.realtimeSinceStartup + 1;
+                ReadyStatus();
+            }
             if (Input.GetKeyDown(KeyCode.Space)) TriggerCapture();
             if (Input.GetKeyDown(KeyCode.R) && uploader != null) uploader.Wake();
             if (Input.GetKeyDown(KeyCode.Backspace) && !IsCapturing)
             {
-                foreach (var label in labels) if (label != null) Destroy(label.gameObject);
-                labels.Clear();
+                ClearVisibleLabels();
                 ReadyStatus();
             }
         }
 
 #if UNITY_WSA && !UNITY_EDITOR
-        private void OnTapped(TappedEventArgs args) { TriggerCapture(); }
+        private void SubscribeInput()
+        {
+            if (inputSubscribed) return;
+            InteractionManager.InteractionSourcePressed += OnSelectPressed;
+            InteractionManager.InteractionSourceReleased += OnSelectReleased;
+            InteractionManager.InteractionSourceLost += OnSourceLost;
+            inputSubscribed = true;
+        }
+        private void UnsubscribeInput()
+        {
+            if (!inputSubscribed) return;
+            InteractionManager.InteractionSourcePressed -= OnSelectPressed;
+            InteractionManager.InteractionSourceReleased -= OnSelectReleased;
+            InteractionManager.InteractionSourceLost -= OnSourceLost;
+            inputSubscribed = false;
+        }
+        private void OnSelectPressed(InteractionSourcePressedEventArgs args)
+        {
+            if (args.pressType == InteractionSourcePressType.Select) SelectPressed(args.state.source.id);
+        }
+        private void OnSelectReleased(InteractionSourceReleasedEventArgs args)
+        {
+            if (args.pressType == InteractionSourcePressType.Select) SelectReleased(args.state.source.id);
+        }
+        private void OnSourceLost(InteractionSourceLostEventArgs args) { SelectReleased(args.state.source.id); }
 #endif
+
+        public void SelectPressed(uint source)
+        {
+            if (pressGate.Press(source, Time.realtimeSinceStartup, IsReady && !IsCapturing && !handoffActive && !applicationPaused && isActiveAndEnabled && !disposed))
+                TriggerCapture();
+        }
+        public void SelectReleased(uint source) { pressGate.Release(source); }
 
         public void TriggerCapture()
         {
-            if (!IsReady || IsCapturing || disposed) return;
-            if (uploader.IsPaused) { uploader.Wake(); return; }
+            if (!IsReady || IsCapturing || handoffActive || applicationPaused || disposed) return;
+            // Retrying old uploads must not consume the user's only shutter gesture.
+            if (uploader.IsPaused) uploader.Wake();
             try
             {
+                if (History != null && !History.HasCapacity) { Fail("History archive queue full; wait for PC backup."); return; }
                 if (!outbox.HasCapacity()) { Fail("Upload queue full. Existing photos kept; wait for the PC."); return; }
             }
             catch (Exception error) { Fail(error.Message); return; }
@@ -190,7 +240,28 @@ namespace HoloLensCaptureDemo
             LastError = null;
             captureMessage = null;
             SetStatus("正在拍照并保存…\n不需要再次点击");
-            StartCoroutine(CaptureAndEnqueue());
+            StartCoroutine(CaptureWithLiveHandoff());
+        }
+
+        private IEnumerator CaptureWithLiveHandoff()
+        {
+            handoffActive = true;
+            cameraLease = new CameraCaptureLease(Config);
+            try
+            {
+                yield return cameraLease.Acquire(SetStatus);
+                if (cameraLease.MayCapture) yield return CaptureAndEnqueue();
+                else Fail(cameraLease.Error);
+                // Release after PhotoCapture has stopped/disposed, before video resumes.
+                yield return cameraLease.Release();
+            }
+            finally
+            {
+                if (cameraLease != null) cameraLease.Dispose();
+                cameraLease = null;
+                handoffActive = false; IsCapturing = false;
+                ReadyStatus();
+            }
         }
 
         private IEnumerator CaptureAndEnqueue()
@@ -223,7 +294,7 @@ namespace HoloLensCaptureDemo
                 if (!done || cameraCapture == null)
                 {
                     cancelled = true;
-                    Fail("Camera unavailable. Check camera permission; emulator builds can use simulatedCamera.");
+                    Fail("摄像头不可用。请允许相机权限；关闭旧直播页，使用新版系统直播控制页自动切换。");
                     yield break;
                 }
                 var resolutions = PhotoCapture.SupportedResolutions.OrderBy(r => r.width * r.height).ToArray();
@@ -249,7 +320,7 @@ namespace HoloLensCaptureDemo
                     success = result.success; photoMode = result.success; done = true;
                 });
                 yield return WaitForCallback(() => done, 15f);
-                if (!done || !success) errorMessage = "Could not start the photo camera. Check webcam permission.";
+                if (!done || !success) errorMessage = "未能启动相机。请检查权限或关闭未受控制的旧直播窗口，然后松开再合拢重试。";
                 if (errorMessage == null)
                 {
                     done = false;
@@ -316,6 +387,8 @@ namespace HoloLensCaptureDemo
 #endif
             try
             {
+                captureLabel.CaptureId = captureId;
+                History.Register(captureId, captureLabel.transform.position);
                 outbox.Enqueue(captureId, image);
                 pendingLabels.Add(captureId, captureLabel);
                 Debug.Log("Capture queued: " + captureId + " point=" + captureLabel.transform.position.ToString("F4") + " simulated=" + simulated);
@@ -324,6 +397,7 @@ namespace HoloLensCaptureDemo
             catch (Exception error) { errorMessage = error.Message; }
             if (errorMessage != null)
             {
+                History.CancelPending(captureId);
 #if UNITY_WSA && !UNITY_EDITOR
                 if (savedAnchor) ForgetAnchor(AnchorPrefix + captureId);
 #endif
@@ -351,22 +425,28 @@ namespace HoloLensCaptureDemo
             AnchoredLabel label;
             if (pendingLabels.TryGetValue(photo.captureId, out label) && label != null)
             {
-                label.SetResult(response.serial);
-                labels.Add(label);
-                pendingLabels.Remove(photo.captureId);
-                captureMessage = response.serial + " placed at capture location";
+                if (!History.PendingIds.Contains(photo.captureId))
+                    History.Register(photo.captureId, label.transform.position);
+                label.CaptureId = photo.captureId;
+                if (History.IsCurrentWork(photo.captureId))
+                {
+                    label.SetResult(response.serial);
+                    labels.Add(label);
+                    pendingLabels.Remove(photo.captureId);
+                    captureMessage = response.serial + " placed at capture location";
+                }
+                else captureMessage = response.serial + " belongs to the previous work; archiving on PC";
                 while (labels.Count > Config.maxLabels)
                 {
-                    Destroy(labels[0].gameObject);
+                    RetireLabel(labels[0]);
                     labels.RemoveAt(0);
                 }
             }
             else captureMessage = response.serial + " on PC; saved anchor unavailable";
             LastSerial = response.serial;
             LastError = null;
-#if UNITY_WSA && !UNITY_EDITOR
-            ForgetAnchor(AnchorPrefix + photo.captureId);
-#endif
+            // A completed photo no longer needs its JPEG, but its local anchor remains
+            // until the PC has durably acknowledged the exported spatial backup.
             Debug.Log("Capture completed: " + response.serial + " (" + response.processingMs + " ms server)");
             ReadyStatus();
         }
@@ -380,6 +460,77 @@ namespace HoloLensCaptureDemo
                 return null;
             }
             catch (Exception error) { return error.Message; }
+        }
+
+        public AnchoredLabel FindCaptureLabel(string id)
+        {
+            AnchoredLabel pending;
+            if (pendingLabels.TryGetValue(id, out pending) && pending != null) return pending;
+            return labels.FirstOrDefault(label => label != null && label.CaptureId == id);
+        }
+
+        public AnchoredLabel LoadSavedCaptureAnchor(string id)
+        {
+#if UNITY_WSA && !UNITY_EDITOR
+            return anchorStore == null ? null : AnchoredLabel.RestorePending(anchorStore, AnchorPrefix + id);
+#else
+            return null;
+#endif
+        }
+
+        public void ForgetCaptureAnchor(string id)
+        {
+            AnchoredLabel hidden;
+            if (!IsPhotoPending(id) && pendingLabels.TryGetValue(id, out hidden))
+            {
+                if (hidden != null) Destroy(hidden.gameObject);
+                pendingLabels.Remove(id);
+            }
+#if UNITY_WSA && !UNITY_EDITOR
+            ForgetAnchor(AnchorPrefix + id);
+#endif
+        }
+
+        public void AddHistoryLabel(AnchoredLabel label, string id, string serial)
+        {
+            if (FindCaptureLabel(id) != null) { Destroy(label.gameObject); return; }
+            label.CaptureId = id;
+            label.SetResult(serial);
+            labels.Add(label);
+            while (labels.Count > Config.maxLabels) { RetireLabel(labels[0]); labels.RemoveAt(0); }
+        }
+
+        private void RetireLabel(AnchoredLabel label)
+        {
+            if (label == null) return;
+            if (!disposed && History != null && History.PendingIds.Contains(label.CaptureId))
+            {
+                // Keep an unbacked anchor alive even if its visual is cleared or evicted.
+                label.HideResult(); pendingLabels[label.CaptureId] = label;
+            }
+            else Destroy(label.gameObject);
+        }
+
+        public void ClearVisibleLabels()
+        {
+            foreach (var label in labels) RetireLabel(label);
+            labels.Clear();
+        }
+
+        public bool TryClearPendingPhotos()
+        {
+            if (IsCapturing || UploadActive) return false;
+            foreach (var photo in outbox.Items.ToArray())
+            {
+                outbox.Complete(photo);
+                AnchoredLabel label;
+                if (pendingLabels.TryGetValue(photo.captureId, out label) && label != null) Destroy(label.gameObject);
+                pendingLabels.Remove(photo.captureId);
+                History.CancelPending(photo.captureId);
+                ForgetCaptureAnchor(photo.captureId);
+            }
+            uploader.Wake();
+            return true;
         }
 
 #if UNITY_WSA && !UNITY_EDITOR
@@ -430,38 +581,51 @@ namespace HoloLensCaptureDemo
 
         private void ReadyStatus()
         {
-            if (Config == null || IsCapturing) return;
+            if (!IsReady || Config == null || IsCapturing || handoffActive) return;
             var mode = Application.isEditor || Config.simulateCamera ? "SIMULATED PHOTO" : "HOLOLENS CAMERA";
             var queueState = uploader == null ? "starting" : uploader.State;
             var detail = uploader == null ? "" : uploader.Detail;
             // A queue/camera error must remain visible even while reconnect probes continue.
             if (!string.IsNullOrEmpty(LastError)) detail = LastError;
-            var hint = uploader != null && uploader.IsPaused ? "空中点击：重试待上传照片" : "拍照并上传：空中点击一次，无需打开系统菜单";
+            var hint = "合拢即拍一张 · 松开后可再拍 · 直播自动暂停/恢复";
             SetStatus(hint + "\n" + mode + " | Queued: " + PendingCount + "/" + Config.maxQueuedCaptures + " | " + queueState +
-                "\n" + (string.IsNullOrEmpty(detail) ? (captureMessage ?? Config.serverUrl) : detail));
+                "\n" + (string.IsNullOrEmpty(detail) ? (captureMessage ?? Config.serverUrl) : detail) +
+                (History == null ? "" : "\n工作 " + History.WorkId.Substring(0, 8) + " | 待归档 " + History.PendingCount + " | " + History.Status));
         }
 
-        private void SetStatus(string message) { if (statusText != null) statusText.text = message; }
+        private void SetStatus(string message) { StatusMessage = message; }
 
         private void OnApplicationPause(bool paused)
         {
+            applicationPaused = paused;
+            pressGate.Reset();
             if (!paused && uploader != null) uploader.Wake();
+        }
+
+        private void OnEnable()
+        {
+#if UNITY_WSA && !UNITY_EDITOR
+            if (IsReady) SubscribeInput();
+#endif
+        }
+        private void OnDisable()
+        {
+            pressGate.Reset();
+#if UNITY_WSA && !UNITY_EDITOR
+            UnsubscribeInput();
+#endif
         }
 
         private void OnDestroy()
         {
             disposed = true;
-            if (statusFont != null) Destroy(statusFont);
             if (uploader != null) uploader.Dispose();
+            if (cameraLease != null) cameraLease.Dispose();
+            ClearVisibleLabels();
             if (captureLabel != null) Destroy(captureLabel.gameObject);
             foreach (var label in pendingLabels.Values) if (label != null) Destroy(label.gameObject);
 #if UNITY_WSA && !UNITY_EDITOR
-            if (gestures != null)
-            {
-                gestures.Tapped -= OnTapped;
-                gestures.StopCapturingGestures();
-                gestures.Dispose();
-            }
+            UnsubscribeInput();
             if (cameraCapture != null) { cameraCapture.Dispose(); cameraCapture = null; }
             if (anchorStore != null) { anchorStore.Dispose(); anchorStore = null; }
 #endif

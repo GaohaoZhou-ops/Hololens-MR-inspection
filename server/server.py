@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from contextlib import closing
 from datetime import datetime, timezone
@@ -25,6 +26,7 @@ from urllib.parse import parse_qs, urlsplit
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 MAX_UPLOADS = 4
 MAX_POSE_BYTES = 96 * 1024
+MAX_ANCHOR_BYTES = 32 * 1024 * 1024
 CAPTURE_ID = re.compile(r"^[a-f0-9]{32}$")
 WEB_ROOT = Path(__file__).resolve().parent / "web"
 DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "server.local.json"
@@ -208,13 +210,13 @@ class CaptureStore:
             db.execute("""UPDATE capture_attempts SET state='interrupted',completed_at=?,
                 error='Receiver stopped before completion was recorded.' WHERE state='processing'""", (utc_now(),))
 
-    @staticmethod
-    def capture_record(row):
+    def capture_record(self, row):
         return {
             "sequence": row["sequence"], "captureId": row["capture_id"],
             "serial": f"HL1-{row['sequence']:06d}", "receivedAt": row["created_at"],
             "imageBytes": row["image_bytes"], "imageSha256": row["sha256"],
             "imageUrl": f"/api/captures/{row['capture_id']}/image",
+            "imageAvailable": (self.directory / "images" / f"HL1-{row['sequence']:06d}-{row['capture_id']}.jpg").is_file(),
             "sourceIp": row["source_ip"], "state": row["state"] or "legacy",
             "processingMs": row["processing_ms"], "completedAt": row["completed_at"],
             "attemptCount": row["attempt_count"],
@@ -268,6 +270,22 @@ class CaptureStore:
     def image_path(self, record):
         return self.directory / "images" / f"{record['serial']}-{record['captureId']}.jpg"
 
+    def image_cache(self, clear=False):
+        count = total = failed = 0
+        with self.lock, closing(sqlite3.connect(self.database)) as db:
+            for sequence, capture_id in db.execute("SELECT sequence,capture_id FROM captures"):
+                path = self.directory / "images" / f"HL1-{sequence:06d}-{capture_id}.jpg"
+                try:
+                    if path.is_file():
+                        size = path.stat().st_size
+                        if clear:
+                            path.unlink()
+                        count += 1
+                        total += size
+                except OSError:
+                    failed += 1
+        return {"count": count, "bytes": total, "failed": failed}
+
 
 class PoseStore:
     """Independent telemetry database; photo history deletion never erases a trajectory."""
@@ -283,6 +301,8 @@ class PoseStore:
                 sampled_at TEXT NOT NULL, tracked INTEGER NOT NULL, tracking_state TEXT NOT NULL,
                 x REAL, y REAL, z REAL, qx REAL, qy REAL, qz REAL, qw REAL,
                 segment INTEGER NOT NULL, PRIMARY KEY(session_id,sequence))""")
+            db.execute("CREATE TABLE IF NOT EXISTS pose_state (id INTEGER PRIMARY KEY, history_revision INTEGER NOT NULL)")
+            db.execute("INSERT OR IGNORE INTO pose_state VALUES(1,0)")
 
     @staticmethod
     def validate(body):
@@ -360,7 +380,8 @@ class PoseStore:
                 MAX(p.sequence) AS last_sequence,MAX(p.elapsed) AS duration
                 FROM sessions s JOIN samples p ON p.session_id=s.session_id
                 GROUP BY s.session_id ORDER BY s.started_at DESC,s.session_id DESC LIMIT ?""", (limit,)).fetchall()
-        return {"sessions": [{"sessionId": r["session_id"], "startedAt": r["started_at"],
+            revision = db.execute("SELECT history_revision FROM pose_state WHERE id=1").fetchone()[0]
+        return {"historyRevision": revision, "sessions": [{"sessionId": r["session_id"], "startedAt": r["started_at"],
                               "deviceName": r["device_name"], "clientKind": r["client_kind"],
                               "lastReceivedAt": r["last_received_at"], "sourceIp": r["source_ip"],
                               "sampleCount": r["samples"], "trackedCount": r["tracked"],
@@ -373,11 +394,319 @@ class PoseStore:
             db.row_factory = sqlite3.Row
             rows = db.execute("SELECT * FROM samples WHERE session_id=? AND sequence>? ORDER BY sequence LIMIT ?",
                               (session_id, after, limit + 1)).fetchall()
+            revision = db.execute("SELECT history_revision FROM pose_state WHERE id=1").fetchone()[0]
         samples = [{"sequence": r["sequence"], "elapsed": r["elapsed"], "sampledAt": r["sampled_at"],
                     "tracked": bool(r["tracked"]), "trackingState": r["tracking_state"], "segment": r["segment"],
                     **{key: r[key] for key in ("x", "y", "z", "qx", "qy", "qz", "qw")}} for r in rows[:limit]]
-        return {"sessionId": session_id, "samples": samples,
+        return {"historyRevision": revision, "sessionId": session_id, "samples": samples,
                 "nextAfter": samples[-1]["sequence"] if samples else after, "hasMore": len(rows) > limit}
+
+
+    def cache_info(self, clear=False):
+        with self.lock, closing(sqlite3.connect(self.database)) as db:
+            count = db.execute("SELECT COUNT(*) FROM samples").fetchone()[0]
+            size = self.database.stat().st_size
+            if clear:
+                with db:
+                    db.execute("DELETE FROM samples")
+                    db.execute("DELETE FROM sessions")
+                    db.execute("UPDATE pose_state SET history_revision=history_revision+1 WHERE id=1")
+                db.execute("VACUUM")
+            return {"count": count, "bytes": max(0, size - self.database.stat().st_size) if clear else size}
+
+
+class WorkStore:
+    """Durable label/anchor archive and acknowledged device commands, separate from caches."""
+    DEVICE_CACHES = {"downloadedAnchors", "visibleLabels", "pendingPhotos", "pendingPoses"}
+
+    def __init__(self, directory):
+        self.database = Path(directory) / "work.sqlite3"
+        self.lock = threading.Lock()
+        with closing(sqlite3.connect(self.database)) as db, db:
+            db.executescript("""
+                CREATE TABLE IF NOT EXISTS devices(
+                    id TEXT PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL,
+                    work_id TEXT NOT NULL, seen_at TEXT NOT NULL, source_ip TEXT NOT NULL,
+                    cache_json TEXT NOT NULL, status TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS works(
+                    id TEXT PRIMARY KEY, title TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+                CREATE TABLE IF NOT EXISTS work_records(
+                    capture_id TEXT PRIMARY KEY, work_id TEXT NOT NULL, device_id TEXT NOT NULL,
+                    serial TEXT NOT NULL, captured_at TEXT NOT NULL, anchor_kind TEXT NOT NULL,
+                    anchor_hash TEXT NOT NULL, anchor_bytes INTEGER NOT NULL, anchor BLOB NOT NULL,
+                    created_at TEXT NOT NULL);
+                CREATE INDEX IF NOT EXISTS work_records_work ON work_records(work_id,created_at);
+                CREATE TABLE IF NOT EXISTS device_commands(
+                    id TEXT PRIMARY KEY, device_id TEXT NOT NULL, kind TEXT NOT NULL,
+                    payload TEXT NOT NULL, created_at TEXT NOT NULL, expires_at REAL,
+                    status TEXT NOT NULL, ack_json TEXT);
+            """)
+
+    @staticmethod
+    def valid_id(value):
+        return isinstance(value, str) and CAPTURE_ID.fullmatch(value) is not None
+
+    @staticmethod
+    def ensure_work(db, work_id, title=None):
+        now = utc_now()
+        db.execute("INSERT OR IGNORE INTO works VALUES(?,?,?,?)",
+                   (work_id, title or ("工作 " + now[:16].replace("T", " ")), now, now))
+
+    def poll(self, body, source_ip):
+        if (not isinstance(body, dict) or not self.valid_id(body.get("deviceId")) or
+                not self.valid_id(body.get("workId")) or body.get("clientKind") not in ("editor", "hololens-uwp") or
+                not isinstance(body.get("deviceName"), str) or not 1 <= len(body["deviceName"]) <= 128):
+            raise ValueError("invalid_device")
+        cache = body.get("cache", {})
+        if not isinstance(cache, dict):
+            raise ValueError("invalid_cache")
+        allowed_counts = ("downloadedAnchors", "downloadBytes", "visibleLabels", "pendingPhotos",
+                          "photoBytes", "pendingPoses", "poseBytes", "pendingArchives")
+        cache = {key: cache.get(key, 0) for key in allowed_counts}
+        if any(type(value) is not int or not 0 <= value <= 2**53 for value in cache.values()):
+            raise ValueError("invalid_cache_counts")
+        status = body.get("status", "")
+        if not isinstance(status, str) or len(status) > 300:
+            raise ValueError("invalid_device_status")
+        with self.lock, closing(sqlite3.connect(self.database)) as db, db:
+            self.ensure_work(db, body["workId"])
+            db.execute("""INSERT INTO devices VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(id) DO UPDATE SET
+                name=excluded.name,kind=excluded.kind,work_id=excluded.work_id,seen_at=excluded.seen_at,
+                source_ip=excluded.source_ip,cache_json=excluded.cache_json,status=excluded.status""",
+                       (body["deviceId"], body["deviceName"], body["clientKind"], body["workId"],
+                        utc_now(), source_ip, json.dumps(cache), status))
+            db.execute("UPDATE device_commands SET status='expired' WHERE status='queued' AND expires_at < ?",
+                       (time.time(),))
+            row = db.execute("SELECT payload FROM device_commands WHERE device_id=? AND status='queued' ORDER BY rowid LIMIT 1",
+                             (body["deviceId"],)).fetchone()
+        return {"command": json.loads(row[0]) if row else None}
+
+    def archive(self, capture, device_id, work_id, kind, data):
+        if not self.valid_id(device_id) or not self.valid_id(work_id) or kind not in ("wsa", "editor", "none"):
+            raise ValueError("invalid_archive_identity")
+        if not 0 <= len(data) <= MAX_ANCHOR_BYTES or (kind == "none") != (len(data) == 0):
+            raise ValueError("invalid_anchor_size")
+        if kind == "editor":
+            point = json.loads(data)
+            if not isinstance(point, dict) or not all(type(point.get(k)) in (int, float) and math.isfinite(point[k]) and abs(point[k]) <= 100000 for k in ("x", "y", "z")):
+                raise ValueError("invalid_editor_anchor")
+        digest = hashlib.sha256(data).hexdigest()
+        with self.lock, closing(sqlite3.connect(self.database)) as db, db:
+            device = db.execute("SELECT kind FROM devices WHERE id=?", (device_id,)).fetchone()
+            if device is None or (kind == "editor" and device[0] != "editor") or (kind == "wsa" and device[0] != "hololens-uwp"):
+                raise ValueError("device_not_registered_or_wrong_kind")
+            prior = db.execute("SELECT work_id,device_id,anchor_kind,anchor_hash FROM work_records WHERE capture_id=?",
+                               (capture["captureId"],)).fetchone()
+            identity = (work_id, device_id, kind, digest)
+            if prior and prior != identity:
+                raise ValueError("archive_conflict")
+            self.ensure_work(db, work_id)
+            db.execute("INSERT OR IGNORE INTO work_records VALUES(?,?,?,?,?,?,?,?,?,?)",
+                       (capture["captureId"], work_id, device_id, capture["serial"], capture["receivedAt"],
+                        kind, digest, len(data), data, utc_now()))
+            db.execute("UPDATE works SET updated_at=? WHERE id=?", (utc_now(), work_id))
+        return {"captureId": capture["captureId"], "serial": capture["serial"], "anchorSha256": digest,
+                "anchorBytes": len(data), "archived": True}
+
+    def overview(self):
+        with self.lock, closing(sqlite3.connect(self.database)) as db:
+            db.row_factory = sqlite3.Row
+            devices = []
+            for row in db.execute("SELECT * FROM devices ORDER BY seen_at DESC"):
+                command = db.execute("SELECT id,kind,status,ack_json,created_at FROM device_commands WHERE device_id=? ORDER BY rowid DESC LIMIT 1", (row["id"],)).fetchone()
+                devices.append({"deviceId": row["id"], "deviceName": row["name"], "clientKind": row["kind"],
+                                "workId": row["work_id"], "lastSeen": row["seen_at"], "sourceIp": row["source_ip"],
+                                "online": (datetime.now(timezone.utc) - datetime.fromisoformat(row["seen_at"])).total_seconds() < 15,
+                                "cache": json.loads(row["cache_json"]), "status": row["status"],
+                                "command": {"commandId": command["id"], "kind": command["kind"], "status": command["status"],
+                                            "result": json.loads(command["ack_json"]) if command["ack_json"] else None} if command else None})
+            works = [{"workId": row[0], "title": row[1], "updatedAt": row[2], "recordCount": row[3],
+                      "restorableCount": row[4] or 0, "anchorBytes": row[5] or 0}
+                     for row in db.execute("""SELECT w.id,w.title,w.updated_at,COUNT(r.capture_id),
+                       SUM(r.anchor_bytes>0),SUM(r.anchor_bytes) FROM works w LEFT JOIN work_records r ON r.work_id=w.id
+                       GROUP BY w.id ORDER BY w.updated_at DESC LIMIT 200""")]
+        return {"devices": devices, "works": works}
+
+    def manifest(self, work_id, limit=12):
+        if not self.valid_id(work_id) or not 1 <= limit <= 30:
+            raise ValueError("invalid_work_or_limit")
+        with self.lock, closing(sqlite3.connect(self.database)) as db:
+            work = db.execute("SELECT title FROM works WHERE id=?", (work_id,)).fetchone()
+            if work is None:
+                return None
+            count = db.execute("SELECT COUNT(*) FROM work_records WHERE work_id=?", (work_id,)).fetchone()[0]
+            rows = db.execute("""SELECT capture_id,serial,anchor_kind,anchor_hash,anchor_bytes,captured_at
+                FROM work_records WHERE work_id=? ORDER BY created_at DESC,capture_id DESC LIMIT ?""", (work_id, limit)).fetchall()
+        return {"workId": work_id, "title": work[0], "total": count,
+                "records": [{"captureId": r[0], "serial": r[1], "anchorKind": r[2], "anchorSha256": r[3],
+                             "anchorBytes": r[4], "capturedAt": r[5]} for r in rows]}
+
+    def anchor(self, capture_id):
+        with self.lock, closing(sqlite3.connect(self.database)) as db:
+            row = db.execute("SELECT anchor FROM work_records WHERE capture_id=?", (capture_id,)).fetchone()
+        return row[0] if row else None
+
+    def archived_capture(self, capture_id):
+        # A lost archive ACK can be retried even after the user clears photo history.
+        # archive() still validates the original work, device, kind and byte digest.
+        with self.lock, closing(sqlite3.connect(self.database)) as db:
+            row = db.execute("SELECT serial,captured_at FROM work_records WHERE capture_id=?", (capture_id,)).fetchone()
+        return {"captureId": capture_id, "serial": row[0], "receivedAt": row[1]} if row else None
+
+    def create_command(self, body):
+        if not isinstance(body, dict) or not self.valid_id(body.get("deviceId")) or not self.valid_id(body.get("commandId")):
+            raise ValueError("invalid_command_identity")
+        kind = body.get("kind")
+        if kind not in ("resume", "new_work", "clear_cache"):
+            raise ValueError("invalid_command_kind")
+        categories = body.get("categories", [])
+        if not isinstance(categories, list) or any(not isinstance(c, str) or c not in self.DEVICE_CACHES for c in categories):
+            raise ValueError("invalid_cache_categories")
+        if kind == "clear_cache" and not categories:
+            raise ValueError("select_cache_categories")
+        title = body.get("title", "")
+        if not isinstance(title, str) or len(title) > 80:
+            raise ValueError("invalid_work_title")
+        with self.lock, closing(sqlite3.connect(self.database)) as db, db:
+            prior = db.execute("SELECT device_id,payload,status FROM device_commands WHERE id=?", (body["commandId"],)).fetchone()
+            if prior:
+                saved = json.loads(prior[1])
+                if prior[0] != body["deviceId"] or saved["kind"] != kind or saved.get("categories", []) != categories or (kind == "resume" and saved["workId"] != body.get("workId")):
+                    raise ValueError("command_conflict")
+                return {"commandId": body["commandId"], "status": prior[2]}
+            device = db.execute("SELECT seen_at FROM devices WHERE id=?", (body["deviceId"],)).fetchone()
+            if device is None:
+                raise ValueError("unknown_device")
+            if kind == "clear_cache" and (datetime.now(timezone.utc) - datetime.fromisoformat(device[0])).total_seconds() >= 15:
+                raise ValueError("device_offline_refresh_before_clearing")
+            work_id = body.get("workId", "")
+            if kind == "new_work":
+                work_id = uuid.uuid4().hex
+                self.ensure_work(db, work_id, title.strip() or None)
+            if kind in ("resume", "new_work") and (not self.valid_id(work_id) or not db.execute("SELECT 1 FROM works WHERE id=?", (work_id,)).fetchone()):
+                raise ValueError("unknown_work")
+            expires = time.time() + 30 if kind == "clear_cache" else None
+            command = {"commandId": body["commandId"], "kind": kind, "workId": work_id,
+                       "categories": categories, "expiresAt": datetime.fromtimestamp(expires, timezone.utc).isoformat() if expires else ""}
+            db.execute("INSERT INTO device_commands VALUES(?,?,?,?,?,?,?,NULL)",
+                       (body["commandId"], body["deviceId"], kind, json.dumps(command), utc_now(), expires, "queued"))
+        return {"commandId": body["commandId"], "status": "queued"}
+
+    def acknowledge(self, body):
+        if (not isinstance(body, dict) or not self.valid_id(body.get("deviceId")) or not self.valid_id(body.get("commandId")) or
+                body.get("status") not in ("completed", "partial", "failed", "interrupted", "expired") or
+                not isinstance(body.get("detail"), str) or len(body["detail"]) > 500):
+            raise ValueError("invalid_command_ack")
+        result = {k: body[k] for k in ("deviceId", "commandId", "status", "detail")}
+        serialized = json.dumps(result)
+        with self.lock, closing(sqlite3.connect(self.database)) as db, db:
+            prior = db.execute("SELECT device_id,ack_json FROM device_commands WHERE id=?", (body["commandId"],)).fetchone()
+            if not prior or prior[0] != body["deviceId"]:
+                raise ValueError("unknown_device_command")
+            if prior[1] and prior[1] != serialized:
+                raise ValueError("ack_conflict")
+            db.execute("UPDATE device_commands SET status=?,ack_json=? WHERE id=?", (body["status"], serialized, body["commandId"]))
+        return {"commandId": body["commandId"], "acknowledged": True}
+
+
+class LivePreviewCoordinator:
+    """Transient camera handoff; the browser owns its Portal player and credentials."""
+    def __init__(self, clock=None):
+        self.clock = clock or time.monotonic
+        self.changed = threading.Condition()
+        self.previews = {}
+        self.leases = {}
+        self.finished = {}
+
+    def prune(self):
+        now = self.clock()
+        self.previews = {k: v for k, v in self.previews.items() if now - v["seen"] < 12}
+        self.leases = {k: v for k, v in self.leases.items() if v["until"] > now}
+        self.finished = {k: v for k, v in self.finished.items() if v[1] > now}
+
+    def active(self, address):
+        return next(((key, value) for key, value in self.leases.items() if value["address"] == address), ("", None))
+
+    def browser(self, body):
+        if not isinstance(body, dict) or not WorkStore.valid_id(body.get("previewId")):
+            raise ValueError("invalid_preview_identity")
+        preview_id, action = body["previewId"], body.get("action")
+        if action not in ("register", "poll", "stop"):
+            raise ValueError("invalid_preview_action")
+        wait = body.get("waitSeconds", 0)
+        if type(wait) not in (int, float) or not 0 <= wait <= 2:
+            raise ValueError("invalid_preview_wait")
+        with self.changed:
+            self.prune()
+            if action == "stop":
+                self.previews.pop(preview_id, None)
+                for lease in self.leases.values():
+                    lease["targets"].discard(preview_id)
+                self.changed.notify_all()
+                return {"action": "stopped", "previewId": preview_id}
+            if action == "register":
+                address = str(ipaddress.IPv4Address(body.get("deviceAddress", "")))
+                if preview_id in self.previews and self.previews[preview_id]["address"] != address:
+                    raise ValueError("preview_identity_conflict")
+                if preview_id not in self.previews and len(self.previews) >= 32:
+                    raise ValueError("too_many_previews")
+                self.previews.setdefault(preview_id, {"address": address, "paused": "", "seen": self.clock()})
+            if preview_id not in self.previews:
+                raise ValueError("preview_expired_restart")
+            preview = self.previews[preview_id]
+            preview["seen"] = self.clock()
+            lease_id, lease = self.active(preview["address"])
+            if lease:
+                lease["targets"].add(preview_id)
+            paused = body.get("pausedLeaseId", "")
+            if paused and paused == lease_id and preview["paused"] != paused:
+                preview["paused"] = paused
+                self.changed.notify_all()
+            key = lease_id or "play"
+            # Long polling wakes immediately on a handoff and keeps working when
+            # the control tab is behind the video window (no throttled JS timer).
+            if action == "poll" and wait and body.get("observed") == key:
+                self.changed.wait(wait)
+                self.prune()
+                if preview_id not in self.previews:
+                    raise ValueError("preview_expired_restart")
+                preview["seen"] = self.clock()
+                lease_id, lease = self.active(preview["address"])
+                if lease:
+                    lease["targets"].add(preview_id)
+            return {"previewId": preview_id, "action": "pause" if lease else "play", "leaseId": lease_id}
+
+    def camera(self, body, address):
+        if not isinstance(body, dict) or not WorkStore.valid_id(body.get("leaseId")):
+            raise ValueError("invalid_camera_lease")
+        lease_id, action = body["leaseId"], body.get("action")
+        if action not in ("acquire", "release"):
+            raise ValueError("invalid_camera_action")
+        with self.changed:
+            self.prune()
+            lease = self.leases.get(lease_id)
+            ended = self.finished.get(lease_id)
+            if (lease and lease["address"] != address) or (ended and ended[0] != address):
+                raise ValueError("camera_identity_conflict")
+            if action == "release":
+                self.leases.pop(lease_id, None)
+                self.finished[lease_id] = (address, self.clock() + 120)
+                self.changed.notify_all()
+                return {"leaseId": lease_id, "released": True}
+            if ended:
+                raise ValueError("camera_lease_ended")
+            if not lease:
+                if self.active(address)[1] is not None:
+                    raise ValueError("camera_busy_conflict")
+                if len(self.leases) >= 32 or len(self.finished) >= 256:
+                    raise ValueError("too_many_camera_requests")
+                lease = {"address": address, "until": self.clock() + 120,
+                         "targets": {key for key, value in self.previews.items() if value["address"] == address}}
+                self.leases[lease_id] = lease
+                self.changed.notify_all()
+            ready = all(key in self.previews and self.previews[key]["paused"] == lease_id for key in lease["targets"])
+            return {"leaseId": lease_id, "ready": ready, "previewCount": len(lease["targets"]),
+                    "settleMs": 750 if lease["targets"] else 0}
 
 
 class CaptureServer(ThreadingHTTPServer):
@@ -391,10 +720,13 @@ class CaptureServer(ThreadingHTTPServer):
             raise ValueError("delay_seconds must be between 0 and 30")
         self.store = store
         self.poses = PoseStore(store.directory)
+        self.work = WorkStore(store.directory)
+        self.live_preview = LivePreviewCoordinator()
         self.api_token = api_token
         self.delay_seconds = delay_seconds
         self.upload_slots = threading.BoundedSemaphore(MAX_UPLOADS)
         self.pose_slots = threading.BoundedSemaphore(2)
+        self.archive_slots = threading.BoundedSemaphore(1)
         super().__init__(address, CaptureHandler)
 
 
@@ -442,7 +774,11 @@ class CaptureHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(payload)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.send_header("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'")
+        policy = "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' blob:; frame-ancestors 'none'; base-uri 'none'; object-src 'none'"
+        if urlsplit(self.path).path == "/system-live":
+            # Only this page embeds the authenticated HTTPS Device Portal video.
+            policy += "; media-src 'self' https:"
+        self.send_header("Content-Security-Policy", policy)
         if download:
             self.send_header("Content-Disposition", f'attachment; filename="{download}"')
         self.send_header("Connection", "close")
@@ -466,21 +802,69 @@ class CaptureHandler(BaseHTTPRequestHandler):
         except ValueError:
             return False
 
+    def device_allowed(self):
+        return hmac.compare_digest(self.headers.get("Authorization", "").encode("utf-8"),
+                                   ("Bearer " + self.server.api_token).encode("utf-8"))
+
+    def read_json_body(self):
+        if self.headers.get_content_type() != "application/json" or self.headers.get("Transfer-Encoding"):
+            raise ValueError("expected_json_with_content_length")
+        size = int(self.headers.get("Content-Length", "0"))
+        if not 1 <= size <= MAX_POSE_BYTES:
+            raise ValueError("json_size_out_of_range")
+        raw = self.rfile.read(size)
+        if len(raw) != size:
+            raise ValueError("incomplete_json")
+        return json.loads(raw)
+
     def do_GET(self):
         path = urlsplit(self.path).path
         if path == "/health":
             self.send_json(200, {"service": "HoloLensCaptureDemo", "status": "ok",
-                                 "delaySeconds": self.server.delay_seconds, "dashboardAvailable": True})
+                                 "delaySeconds": self.server.delay_seconds, "dashboardAvailable": True,
+                                 "historyAvailable": True, "cameraHandoffAvailable": True})
+            return
+        history = re.fullmatch(r"/api/device-history/([a-f0-9]{32})", path)
+        anchor = re.fullmatch(r"/api/device-anchor/([a-f0-9]{32})", path)
+        if history or anchor:
+            if not self.device_allowed():
+                self.send_json(401, {"error": "unauthorized"})
+                return
+            try:
+                if history:
+                    query = parse_qs(urlsplit(self.path).query)
+                    result = self.server.work.manifest(history[1], int(query.get("limit", ["12"])[0]))
+                    self.send_json(200 if result else 404, result or {"error": "work_not_found"})
+                else:
+                    data = self.server.work.anchor(anchor[1])
+                    if data is None:
+                        self.send_json(404, {"error": "anchor_not_found"})
+                    else:
+                        self.send_bytes(200, data, "application/octet-stream")
+            except ValueError as error:
+                self.send_json(400, {"error": str(error)[:128]})
+            except (OSError, sqlite3.Error):
+                self.send_json(500, {"error": "history_read_failed"})
             return
         if not self.viewer_allowed():
             self.send_json(403, {"error": "viewer_local_only", "message": "Open http://127.0.0.1:8765 on the receiving PC."})
             return
         static = {"/": ("index.html", "text/html; charset=utf-8"),
+                  "/system-live": ("system-live.html", "text/html; charset=utf-8"),
+                  "/system-live-paused": ("system-live-paused.html", "text/html; charset=utf-8"),
+                  "/system-live.js": ("system-live.js", "text/javascript; charset=utf-8"),
+                  "/system-live.css": ("system-live.css", "text/css; charset=utf-8"),
                   "/app.js": ("app.js", "text/javascript; charset=utf-8"),
                   "/trajectory.js": ("trajectory.js", "text/javascript; charset=utf-8"),
+                  "/history.js": ("history.js", "text/javascript; charset=utf-8"),
                   "/style.css": ("style.css", "text/css; charset=utf-8"),
                   "/favicon.svg": ("favicon.svg", "image/svg+xml")}
         try:
+            if path == "/api/work-history":
+                result = self.server.work.overview()
+                result["computerCache"] = {"images": self.server.store.image_cache(), "poses": self.server.poses.cache_info()}
+                self.send_json(200, result)
+                return
             if path in static:
                 name, mime = static[path]
                 self.send_bytes(200, (WEB_ROOT / name).read_bytes(), mime)
@@ -534,7 +918,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
         # One-second dashboard polling should not bury actual upload diagnostics.
         if self.command == "GET" and len(args) > 1 and str(args[1]) == "200":
             return
-        if self.command == "POST" and self.path == "/api/poses" and len(args) > 1 and str(args[1]) == "200":
+        if self.command == "POST" and self.path in ("/api/poses", "/api/live-preview") and len(args) > 1 and str(args[1]) == "200":
             return
         super().log_message(format, *args)
 
@@ -561,6 +945,26 @@ class CaptureHandler(BaseHTTPRequestHandler):
                 self.server.upload_slots.release()
 
     def do_POST(self):
+        if self.path in ("/api/live-preview", "/api/camera-lease"):
+            browser = self.path == "/api/live-preview"
+            if browser and (not self.viewer_allowed() or self.headers.get("X-Demo-Action") != "live-preview"):
+                self.reject_upload(403, {"error": "action_not_allowed"})
+                return
+            if not browser and not self.device_allowed():
+                self.reject_upload(401, {"error": "unauthorized"})
+                return
+            try:
+                body = self.read_json_body()
+                result = self.server.live_preview.browser(body) if browser else self.server.live_preview.camera(body, self.client_address[0])
+                self.send_json(200, result)
+            except (ValueError, UnicodeError) as error:
+                self.send_json(409 if "conflict" in str(error) else 400, {"error": str(error)[:128]})
+            except (socket.timeout, TimeoutError):
+                self.send_json(408, {"error": "camera_coordination_timeout"})
+            return
+        if self.path in ("/api/device-poll", "/api/device-acks", "/api/device-commands", "/api/cache/clear") or re.fullmatch(r"/api/work-anchors/[a-f0-9]{32}", self.path):
+            self.receive_work_request()
+            return
         if self.path not in ("/api/captures", "/api/poses"):
             self.reject_upload(404, {"error": "not_found"})
             return
@@ -663,6 +1067,78 @@ class CaptureHandler(BaseHTTPRequestHandler):
             self.send_json(500, {"error": "pose_storage_failure"})
         finally:
             self.server.pose_slots.release()
+
+    def receive_work_request(self):
+        browser_request = self.path in ("/api/device-commands", "/api/cache/clear")
+        if browser_request:
+            required = "device-command" if self.path == "/api/device-commands" else "cache-clear"
+            if not self.viewer_allowed() or self.headers.get("X-Demo-Action") != required:
+                self.reject_upload(403, {"error": "action_not_allowed"})
+                return
+        elif not self.device_allowed():
+            self.reject_upload(401, {"error": "unauthorized"})
+            return
+        acquired = []
+        try:
+            if self.path.startswith("/api/work-anchors/"):
+                if self.headers.get_content_type() != "application/octet-stream" or self.headers.get("Transfer-Encoding"):
+                    raise ValueError("expected_anchor_bytes")
+                size = int(self.headers.get("Content-Length", "-1"))
+                if not 0 <= size <= MAX_ANCHOR_BYTES:
+                    self.send_json(413, {"error": "anchor_size_out_of_range"})
+                    return
+                if not self.server.archive_slots.acquire(blocking=False):
+                    self.reject_upload(503, {"error": "archive_busy"})
+                    return
+                acquired.append(self.server.archive_slots)
+                data = self.rfile.read(size)
+                if len(data) != size:
+                    raise ValueError("incomplete_anchor")
+                capture_id = self.path.rsplit("/", 1)[1]
+                capture = self.server.store.get_capture(capture_id) or self.server.work.archived_capture(capture_id)
+                if capture is None:
+                    self.send_json(409, {"error": "photo_not_uploaded_yet"})
+                    return
+                result = self.server.work.archive(capture, self.headers.get("X-Device-Id"), self.headers.get("X-Work-Id"),
+                                                  self.headers.get("X-Anchor-Kind"), data)
+            else:
+                body = self.read_json_body()
+                if self.path == "/api/device-poll":
+                    result = self.server.work.poll(body, self.client_address[0])
+                elif self.path == "/api/device-acks":
+                    result = self.server.work.acknowledge(body)
+                elif self.path == "/api/device-commands":
+                    result = self.server.work.create_command(body)
+                else:
+                    categories = body.get("categories") if isinstance(body, dict) else None
+                    if not isinstance(categories, list) or not categories or any(c not in ("images", "poses") for c in categories):
+                        raise ValueError("invalid_computer_cache_categories")
+                    slots = []
+                    if "images" in categories:
+                        slots.extend([self.server.upload_slots] * MAX_UPLOADS)
+                    if "poses" in categories:
+                        slots.extend([self.server.pose_slots] * 2)
+                    for slot in slots:
+                        if not slot.acquire(blocking=False):
+                            self.send_json(409, {"error": "uploads_in_progress"})
+                            return
+                        acquired.append(slot)
+                    result = {}
+                    if "images" in categories:
+                        result["images"] = self.server.store.image_cache(clear=True)
+                    if "poses" in categories:
+                        result["poses"] = self.server.poses.cache_info(clear=True)
+            self.send_json(200, result)
+        except (ValueError, UnicodeError) as error:
+            message = str(error)[:128]
+            self.send_json(409 if "conflict" in message or "offline" in message else 400, {"error": message})
+        except (socket.timeout, TimeoutError):
+            self.send_json(408, {"error": "work_request_timeout"})
+        except (OSError, sqlite3.Error):
+            self.send_json(500, {"error": "work_storage_failed"})
+        finally:
+            for slot in acquired:
+                slot.release()
 
 
 def main(argv=None):
