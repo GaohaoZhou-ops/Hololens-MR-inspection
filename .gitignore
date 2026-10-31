@@ -40,12 +40,19 @@ AppPackages/
 
 # Device photos, pose history, databases, queues and diagnostic logs.
 /server/data/
+# Also cover receiver data stored outside the default dataDirectory.
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.sqlite3-*
+**/images/HL1-[0-9]*-*.jpg
 *.log
 *.binlog
 
-# Machine-specific configuration and credentials. Keep example templates.
-/config/*.local.json
-/config/*.local.json.meta
+# Machine-specific configuration, including custom --config paths.
+# Keep *.example.json templates and shared project settings.
+*.local.json
+*.local.json.meta
 /Assets/StreamingAssets/demo-config.json
 /Assets/StreamingAssets/demo-config.json.meta
 .env
@@ -58,6 +65,8 @@ AppPackages/
 *.pfx.meta
 *.p12
 *.p12.meta
+*.pem
+*.pem.meta
 *.key
 *.key.meta
 *.snk
@@ -73,6 +82,8 @@ __pycache__/
 *$py.class
 .venv/
 venv/
+env/
+ENV/
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -81,9 +92,12 @@ venv/
 .coverage
 .coverage.*
 htmlcov/
+.ipynb_checkpoints/
 
 # Operating-system and editor temporary files.
 .DS_Store
+._*
+.AppleDouble/
 Thumbs.db
 Desktop.ini
 *~

@@ -1,17 +1,21 @@
 #!/usr/bin/env python3
-"""Local photo receiver. Stores JPEGs, waits one second, returns a serial number."""
+"""Cross-platform photo receiver and web monitor for HoloLensCaptureDemo."""
 import argparse
 import hashlib
 import hmac
 import ipaddress
 import json
 import math
+import os
 import re
+import secrets
 import shutil
 import socket
 import sqlite3
+import sys
 import threading
 import time
+import webbrowser
 from contextlib import closing
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -23,6 +27,48 @@ MAX_UPLOADS = 4
 MAX_POSE_BYTES = 96 * 1024
 CAPTURE_ID = re.compile(r"^[a-f0-9]{32}$")
 WEB_ROOT = Path(__file__).resolve().parent / "web"
+DEFAULT_CONFIG_PATH = Path(__file__).resolve().parents[1] / "config" / "server.local.json"
+TOKEN_PLACEHOLDER = "replace-with-the-paired-client-token"
+
+
+def initialize_config(path):
+    """Create local credentials once; never rotate an existing device's token."""
+    path = Path(path).resolve()
+    config = {"host": "0.0.0.0", "port": 8765, "apiToken": secrets.token_urlsafe(32),
+              "delaySeconds": 1.0, "dataDirectory": "../server/data"}
+    path.parent.mkdir(parents=True, exist_ok=True)
+    # Exclusive creation also protects an existing config from concurrent initializers.
+    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+        json.dump(config, output, indent=2)
+        output.write("\n")
+    return path
+
+
+def load_config(path):
+    path = Path(path).resolve()
+    config = json.loads(path.read_text(encoding="utf-8-sig"))
+    if not isinstance(config, dict):
+        raise ValueError("The receiver configuration must be a JSON object.")
+    token = config.get("apiToken")
+    if not isinstance(token, str) or len(token) < 24 or token == TOKEN_PLACEHOLDER:
+        raise ValueError("apiToken must match the HoloLens client and contain at least 24 characters; "
+                         "use --init-config to generate a new configuration.")
+    host = config.get("host", "0.0.0.0")
+    if not isinstance(host, str) or not host:
+        raise ValueError("host must be a nonempty IPv4 address or hostname.")
+    port = config.get("port", 8765)
+    if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
+        raise ValueError("port must be an integer from 0 to 65535 (0 selects a temporary port).")
+    delay = config.get("delaySeconds", 1.0)
+    if isinstance(delay, bool) or not isinstance(delay, (int, float)) or not 0 <= delay <= 30:
+        raise ValueError("delaySeconds must be a number from 0 to 30.")
+    directory = config.get("dataDirectory", "../server/data")
+    if not isinstance(directory, str) or not directory:
+        raise ValueError("dataDirectory must be a nonempty path, relative to the config file or absolute.")
+    config.update(host=host, port=port, delaySeconds=delay,
+                  dataDirectory=(path.parent / directory).resolve())
+    return config
 
 
 def utc_now():
@@ -363,6 +409,33 @@ class CaptureHandler(BaseHTTPRequestHandler):
         payload = json.dumps(body, ensure_ascii=False).encode("utf-8")
         return self.send_bytes(status, payload, "application/json; charset=utf-8")
 
+    def reject_upload(self, status, body):
+        # Closing with unread upload bytes can discard the HTTP error via a TCP reset
+        # on Windows. Drain an ordinary body within a bounded budget before replying.
+        # Never wait for oversized/chunked uploads or for an unbounded slow sender.
+        try:
+            remaining = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            remaining = 0
+        if 0 < remaining <= MAX_IMAGE_BYTES and not self.headers.get("Transfer-Encoding"):
+            deadline = time.monotonic() + .25
+            original_timeout = self.connection.gettimeout()
+            try:
+                while remaining > 0:
+                    wait = deadline - time.monotonic()
+                    if wait <= 0:
+                        break
+                    self.connection.settimeout(wait)
+                    chunk = self.rfile.read1(min(remaining, 64 * 1024))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                pass
+            finally:
+                self.connection.settimeout(original_timeout)
+        return self.send_json(status, body)
+
     def send_bytes(self, status, payload, content_type, download=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -489,22 +562,22 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         if self.path not in ("/api/captures", "/api/poses"):
-            self.send_json(404, {"error": "not_found"})
+            self.reject_upload(404, {"error": "not_found"})
             return
         authorization = self.headers.get("Authorization", "")
         if not hmac.compare_digest(authorization.encode("utf-8"),
                                    ("Bearer " + self.server.api_token).encode("utf-8")):
-            self.send_json(401, {"error": "unauthorized"})
+            self.reject_upload(401, {"error": "unauthorized"})
             return
         if self.path == "/api/poses":
             self.receive_poses()
             return
         capture_id = self.headers.get("X-Capture-Id", "")
         if not CAPTURE_ID.fullmatch(capture_id):
-            self.send_json(400, {"error": "invalid_capture_id"})
+            self.reject_upload(400, {"error": "invalid_capture_id"})
             return
         if self.headers.get_content_type() != "image/jpeg":
-            self.send_json(415, {"error": "expected_image_jpeg"})
+            self.reject_upload(415, {"error": "expected_image_jpeg"})
             return
         if self.headers.get("Transfer-Encoding"):
             self.send_json(400, {"error": "use_content_length"})
@@ -518,7 +591,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
             self.send_json(413, {"error": "image_size_out_of_range"})
             return
         if not self.server.upload_slots.acquire(blocking=False):
-            self.send_json(503, {"error": "busy_try_again"})
+            self.reject_upload(503, {"error": "busy_try_again"})
             return
         started = time.monotonic()
         attempt_id = None
@@ -563,7 +636,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
 
     def receive_poses(self):
         if self.headers.get_content_type() != "application/json":
-            self.send_json(415, {"error": "expected_json"})
+            self.reject_upload(415, {"error": "expected_json"})
             return
         try:
             size = int(self.headers.get("Content-Length", "0"))
@@ -573,7 +646,7 @@ class CaptureHandler(BaseHTTPRequestHandler):
             self.send_json(413, {"error": "pose_batch_size_out_of_range"})
             return
         if not self.server.pose_slots.acquire(blocking=False):
-            self.send_json(503, {"error": "busy_try_again"})
+            self.reject_upload(503, {"error": "busy_try_again"})
             return
         try:
             raw = self.rfile.read(size)
@@ -592,19 +665,59 @@ class CaptureHandler(BaseHTTPRequestHandler):
             self.server.pose_slots.release()
 
 
-def main():
+def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--config", type=Path, required=True)
-    args = parser.parse_args()
-    config = json.loads(args.config.read_text(encoding="utf-8-sig"))
-    data_directory = (args.config.parent / config.get("dataDirectory", "../server/data")).resolve()
-    server = CaptureServer((config.get("host", "0.0.0.0"), int(config.get("port", 8765))),
-                           CaptureStore(data_directory), config["apiToken"],
-                           float(config.get("delaySeconds", 1)))
+    parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG_PATH,
+                        help="receiver JSON file (default: config/server.local.json in this project)")
+    parser.add_argument("--init-config", action="store_true",
+                        help="create a local config with a random token, then exit; never overwrite")
+    parser.add_argument("--open-browser", action="store_true",
+                        help="open the local web monitor after starting the receiver")
+    parser.add_argument("--no-browser", dest="open_browser", action="store_false",
+                        help="disable automatic browser opening when using RunServer scripts")
+    args = parser.parse_args(argv)
+    if sys.version_info < (3, 11):
+        parser.error("Python 3.11 or newer is required.")
+    if args.init_config:
+        try:
+            path = initialize_config(args.config)
+        except FileExistsError:
+            parser.error("Configuration already exists; it was kept unchanged. Omit --init-config to run.")
+        except OSError:
+            parser.error("Cannot create configuration; check the destination and write permissions.")
+        print(f"Created receiver configuration: {path}", flush=True)
+        print("Pair the HoloLens client with the same apiToken and this computer's LAN address.", flush=True)
+        print("The token was saved to the local file and is not printed. Run again without --init-config to start.", flush=True)
+        return
+    try:
+        config = load_config(args.config)
+    except FileNotFoundError:
+        parser.error("Configuration not found. Copy the paired server.local.json here, "
+                     "or run with --init-config for a new setup.")
+    except json.JSONDecodeError:
+        parser.error("Configuration is not valid JSON.")
+    except (ValueError, UnicodeError) as error:
+        parser.error(str(error))
+    except OSError:
+        parser.error("Cannot read configuration; check the file permissions.")
+    data_directory = config["dataDirectory"]
+    try:
+        server = CaptureServer((config["host"], config["port"]), CaptureStore(data_directory),
+                               config["apiToken"], config["delaySeconds"])
+    except OSError:
+        parser.error("Cannot start receiver; check the listen address, port availability and data-directory permissions.")
     server.store.recover_pending()
     print(f"Photo receiver listening on port {server.server_port}; delay={server.delay_seconds}s", flush=True)
     print(f"Photos and serial database: {data_directory}", flush=True)
     print(f"Browser monitor: http://127.0.0.1:{server.server_port}/", flush=True)
+    print("Press Ctrl+C in this terminal to stop the receiver.", flush=True)
+    if args.open_browser:
+        def open_monitor():
+            try:
+                webbrowser.open(f"http://127.0.0.1:{server.server_port}/", new=2)
+            except (OSError, webbrowser.Error):
+                print("Open the browser monitor URL manually on this computer.", flush=True)
+        threading.Thread(target=open_monitor, daemon=True).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

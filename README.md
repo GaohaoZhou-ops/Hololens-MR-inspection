@@ -2,7 +2,67 @@
 
 HoloLens 1 单次拍照、电脑接收并返回序列号、世界空间标签的最小 Unity Demo。
 
-工程目录：`C:\Users\Thinkpad\Documents\HololensWorkspace\HoloLensCaptureDemo`。共享工具链在同级 `HoloLens1Environment`，Unity 固定为 **2019.4.41f2**。请一起保留这两个目录的相对位置。
+工程目录：`C:\Users\Thinkpad\Documents\HololensWorkspace\HoloLensCaptureDemo`。Windows 上的 Unity 构建及部署工具链在同级 `HoloLens1Environment`，Unity 固定为 **2019.4.41f2**；使用这些构建脚本时需保留两个目录的相对位置。独立运行接收服务和 Web 不需要 Unity 或该工具链。
+
+## Windows / Linux / macOS 共用服务端
+
+三个平台运行同一份 `server/server.py` 和 `server/web/`，只需 **Python 3.11+（包含 sqlite3）**，当前 Demo 无第三方 Python 包、Node.js 或数据库服务依赖。路径使用 Python 的跨平台 [`pathlib`](https://docs.python.org/3/library/pathlib.html)，照片和轨迹保存在本地 SQLite 与 JPEG 文件中。精简 Python 发行版需确认包含 [`sqlite3`](https://docs.python.org/3/library/sqlite3.html)。
+
+| 部分 | 运行位置 |
+|---|---|
+| 拍照、头部追踪、空间锚点、显示返回结果 | HoloLens 1 |
+| 接收照片、图像处理入口、响应、离线补传接收、姿态存储 | Windows / Linux / macOS，同一套 Python 代码 |
+| 照片、结果、轨迹的 Web 查看页面 | 三个平台的浏览器，同一套 HTML / CSS / JavaScript |
+| Unity → UWP x86 编译、签名和部署 | Windows |
+
+独立启动入口在前台运行，服务启动后**默认自动打开 Web 查看页**，按 **Ctrl+C** 停止。已有配置时，在工程目录运行：
+
+```powershell
+# Windows PowerShell
+.\RunServer.cmd
+```
+
+```sh
+# Linux / macOS
+sh ./RunServer.sh
+```
+
+无需再传 `--open-browser`；在没有桌面的服务器上，可加 `--no-browser` 只启动服务。`--init-config` 仅生成配置，不启动服务或打开浏览器。
+
+两者均调用同一个 Python 服务；所有平台也可直接执行 `python server/server.py --config config/server.local.json`（Linux / macOS 通常使用 `python3`，直接运行 Python 时仍需 `--open-browser` 才会打开网页）。可用 `--config <路径>` 指定其他配置，`--help` 查看参数；默认配置路径固定相对于工程，不受启动时工作目录影响。图片存储路径相对于**配置文件所在目录**解析，建议配置使用 `../server/data` 这类正斜杠相对路径，便于迁移。
+
+启动脚本优先使用 `HOLOLENS_PYTHON` 指定的 Python 可执行文件，其次使用工程 `.venv`。Windows 随后尝试已有共享 Python、`py -3` 和 `python`；Linux / macOS 随后使用 `python3`。因而可以直接复用本机工具链，也可以只安装普通 Python。现有 `StartServer.cmd` / `OpenMonitor.cmd` / `StopServer.cmd` 保留为本机 Windows 后台启动入口，仍使用已准备的共享环境；独立入口不受这些脚本限制。
+
+**首次配置：**如果还没有配对配置，先执行下面对应平台的一条命令，再正常启动：
+
+```text
+Windows:       .\RunServer.cmd --init-config
+Linux / macOS: sh ./RunServer.sh --init-config
+```
+
+生成器仅创建缺失的 `config/server.local.json`，生成随机密钥且不在终端打印；配置已存在时拒绝覆盖。`config/server.example.json` 说明字段，示例密钥不能直接用于启动。`host` 默认 `0.0.0.0` 接收局域网连接，`port` 默认 `8765`，`delaySeconds` 默认 `1`。新生成的密钥必须同步给 Windows 构建机上的客户端配置，再构建头显应用。
+
+**把当前已配对设备的接收端迁移到 Linux / Mac：**
+
+1. 在目标电脑放置工程代码和 Python；仅运行服务时，保留 `server/`（含 `web/`）、`config/` 和对应 `RunServer` 启动脚本即可。
+2. 将当前的 `config/server.local.json` 私下复制到目标电脑的同一相对位置，保留与头显一致的 `apiToken`；不要重新生成密钥。需要迁移历史照片和轨迹时，先停止原接收服务，再完整复制 `server/data/`。
+3. 在目标电脑启动 `RunServer`，允许头显所在局域网访问目标电脑的 TCP 8765。浏览器在**该接收电脑**打开 `http://127.0.0.1:8765/`。浏览器页面无需填写配对密钥。
+4. 当前头显包中的服务器地址在构建时写入。若目标电脑地址不同，在 Windows 构建机执行下列命令（把示例 IP 换成目标电脑的地址），随后按已有流程构建、签名、升级安装：
+
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\Configure-Lan.ps1 -Address 192.168.100.50
+   .\BuildDemo.cmd
+   powershell -ExecutionPolicy Bypass -File scripts\Sign-Demo.ps1
+   .\DeployUsb.cmd -DeviceId <头显设备ID>
+   ```
+
+   `Configure-Lan.ps1` 保留 Windows 构建机现有配置中的密钥；若目标接收端另行生成了新密钥，先将其 `server.local.json` 同步回构建机再执行。目标平台的图像处理代码更新不需要重编译头显；修改服务器地址、配对密钥或头显接口/显示逻辑时才需要更新头显包。
+
+查看页目前仍限接收电脑本机访问；跨平台运行不等于开放远程网页。无桌面的 Linux 可从自己的电脑使用 SSH 本地转发 `ssh -L 8765:127.0.0.1:8765 user@接收机地址`，再打开本机 `http://127.0.0.1:8765/`（该本地端口需空闲）。头显继续直接访问接收机局域网地址。
+
+当前图像处理仍是保存 JPEG 后 `sleep(delaySeconds)` 并返回序列号，尚未接入识别模型。后续推理写在相同 Python 处理入口，三平台共用代码；模型运行库及 GPU 加速后端需按所选框架适配平台。当前客户端对序列号和中心坐标有约束，新增识别结果字段需同步调整头显显示，详见下文接口说明。
+
+2026-10-31：**29 项测试已在 Windows 原生 Python 和 WSL/Linux 上分别通过**，覆盖不带 Unity/共享工具链的独立副本、含空格路径、从其他工作目录启动、Windows BOM 配置、密钥不输出及不覆盖、照片与姿态上传、网页资源与原图读取。另修正了提前拒绝上传时未接收完请求体导致 Windows 偶发连接重置的问题，受限时长的请求体清理已通过 20 次重复回归。日志位于 `logs/portable-server-tests-{windows,linux}.log` 和 `logs/portable-http-rejection-windows.log`。macOS 使用同一代码与 POSIX 启动脚本，**尚未在 Mac 实机执行验证**；可运行 `python3 -m unittest discover -s tests -v` 完成同一套检查。
 
 ## 先在电脑上运行
 
@@ -130,7 +190,9 @@ App 内左上角常驻显示 `Wi-Fi: <当前 SSID>` 和 `IPv4: <该 Wi-Fi 网卡
 | `Assets/CaptureDemo/Scripts/PoseTelemetry.cs` | 1 Hz 头部位姿采样、会话原点、追踪状态和姿态上传 |
 | `Assets/CaptureDemo/Scripts/PoseOutbox.cs` | 姿态磁盘暂存、分段补传与确认后清理 |
 | `Assets/CaptureDemo/Editor/DemoBuild.cs` | HoloLens 1 设置、场景创建、构建 |
-| `server/server.py` | Windows 原生 Python 接收服务，无第三方依赖 |
+| `server/server.py` | 三平台共用的 Python 接收服务、配置生成与图像处理入口 |
+| `RunServer.cmd` / `RunServer.sh` | 独立前台启动，不依赖 Unity 工具链 |
+| `config/server.example.json` | 不含真实配对密钥的服务端配置说明 |
 | `server/web/` | 本地浏览器查看页，无前端依赖或外部 CDN |
 | `server/data/images/` | 实际收到的 JPEG |
 | `server/data/captures.sqlite3` | 持久序列号、请求 ID、图片摘要及每次请求的响应、耗时和发送状态 |
@@ -139,9 +201,9 @@ App 内左上角常驻显示 `Wi-Fi: <当前 SSID>` 和 `IPv4: <该 Wi-Fi 网卡
 
 `Assets/StreamingAssets/demo-config.json` 是本地客户端配置，`config/server.local.json` 是服务端配置；两者含配对密钥，已加入 `.gitignore`。`config/demo-config.example.json` 可作为模板。不要将密钥或含密钥的构建包发到公开仓库。
 
-Git 仓库位于本工程目录，保留 Unity 源码与对应 `.meta`、场景、`Packages`（含锁文件）、`ProjectSettings`、接收服务、网页、脚本和测试。构建包、签名证书、缓存、日志、上传照片、姿态数据库及本机配置均不提交；它们仍保留在本机。同级 `HoloLens1Environment` 是外部工具链，不在本仓库内。新检出工程后，先按上述相对位置准备共享环境，再运行 `Configure-Lan.cmd` 生成本机配置，随后启动服务或构建；该操作会为新的接收端生成独立配对密钥，不会带入原机器的照片或历史记录。
+Git 仓库位于本工程目录，保留 Unity 源码与对应 `.meta`、场景、`Packages`（含锁文件）、`ProjectSettings`、接收服务、网页、脚本和测试。构建包、签名证书、缓存、日志、上传照片、姿态数据库及本机配置均不提交；它们仍保留在本机。同级 `HoloLens1Environment` 是外部工具链，不在本仓库内。新检出工程后，若要进行 Unity 构建，先按上述相对位置准备共享环境，再运行 `Configure-Lan.cmd` 生成本机配置；仅运行服务则使用前文独立入口。首次生成配置不会带入原机器的照片或历史记录，已有设备应复制原配对配置。
 
-可调整客户端 `distanceMeters`（0.5–5 米）、`maxLabels`、`requestTimeoutSeconds`、`maxQueuedCaptures`（默认 20）、`maxQueueMegabytes`（默认 64）；服务端 `delaySeconds` 默认 `1.0`。修改客户端配置后需要重新构建 UWP 应用。服务端运行于 Windows，避免头显访问 WSL NAT 时需要额外端口转发。
+可调整客户端 `distanceMeters`（0.5–5 米）、`maxLabels`、`requestTimeoutSeconds`、`maxQueuedCaptures`（默认 20）、`maxQueueMegabytes`（默认 64）；服务端 `delaySeconds` 默认 `1.0`。修改客户端配置后需要重新构建 UWP 应用。本机现有接收服务仍运行于 Windows；服务端也可独立运行在 Linux / macOS。WSL 测试可验证 Linux 代码，头显访问 WSL 则还取决于 WSL 的网络模式和端口可达性，不等同于部署到原生 Linux 局域网电脑。
 
 ## 接口与后续接推理
 

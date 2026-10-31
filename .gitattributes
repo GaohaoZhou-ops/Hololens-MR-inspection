@@ -1,0 +1,3 @@
+# POSIX launchers must retain LF when the repository is checked out on Windows.
+*.sh text eol=lf
+*.cmd text eol=crlf

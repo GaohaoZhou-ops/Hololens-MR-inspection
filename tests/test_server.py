@@ -94,6 +94,37 @@ class ReceiverTests(unittest.TestCase):
         self.assertEqual(self.request(image=b"not a picture")[0], 400)
         self.assertEqual(list((Path(self.directory.name) / "images").iterdir()), [])
 
+    def test_rejected_upload_with_body_after_headers_returns_http_error(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=3)
+        try:
+            connection.putrequest("POST", "/api/captures")
+            connection.putheader("Authorization", "Bearer wrong")
+            connection.putheader("Content-Length", str(len(JPEG)))
+            connection.endheaders()
+            time.sleep(.05)
+            connection.send(JPEG)
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            self.assertEqual(json.loads(response.read()), {"error": "unauthorized"})
+        finally:
+            connection.close()
+        self.assertEqual(list((Path(self.directory.name) / "images").iterdir()), [])
+
+    def test_rejected_upload_does_not_wait_indefinitely_for_missing_body(self):
+        connection = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=2)
+        try:
+            connection.putrequest("POST", "/api/captures")
+            connection.putheader("Authorization", "Bearer wrong")
+            connection.putheader("Content-Length", str(len(JPEG)))
+            connection.endheaders()
+            started = time.monotonic()
+            response = connection.getresponse()
+            self.assertEqual(response.status, 401)
+            response.read()
+            self.assertLess(time.monotonic() - started, 1.5)
+        finally:
+            connection.close()
+
     def test_duplicate_request_is_idempotent_and_conflict_is_rejected(self):
         capture_id = uuid.uuid4().hex
         status, first = self.request(capture_id=capture_id)
